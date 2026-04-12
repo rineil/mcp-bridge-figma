@@ -54,18 +54,18 @@ File JSON xuất hiện trong `mcp-bridge-figma/exports/`.
     "figma-bridge": {
       "command": "node",
       "args": [
-        "/Users/cuongpham/Documents/Workspace/reform/mcp-bridge-figma/dist-mcp/server.js"
+        "path/to/mcp-bridge-figma/dist-mcp/server.js"
       ],
-      "cwd": "/Users/cuongpham/Documents/Workspace/reform/mcp-bridge-figma",
+      "cwd": "path/to/reform/mcp-bridge-figma",
       "env": {
-        "FIGMA_EXPORT_DIR": "/Users/cuongpham/Documents/Workspace/reform/mcp-bridge-figma/exports"
+        "FIGMA_EXPORT_DIR": "path/to/reform/mcp-bridge-figma/exports"
       }
     }
   }
 }
 ```
 
-Đổi các đường dẫn `/Users/cuongpham/...` thành đúng máy bạn. **Dùng đường dẫn tuyệt đối trong `args`** (tới `dist-mcp/server.js`): một số bản Cursor không áp dụng `cwd` khi spawn `node`, nên `dist-mcp/server.js` tương đối bị resolve thành **`$HOME/dist-mcp/server.js`** → lỗi `Cannot find module '/Users/<bạn>/dist-mcp/server.js'`.
+Đổi các đường dẫn `path/to...` thành đúng máy bạn. **Dùng đường dẫn tuyệt đối trong `args`** (tới `dist-mcp/server.js`): một số bản Cursor không áp dụng `cwd` khi spawn `node`, nên `dist-mcp/server.js` tương đối bị resolve thành **`$HOME/dist-mcp/server.js`** → lỗi `Cannot find module '/Users/<bạn>/dist-mcp/server.js'`.
 
 **Tuỳ chọn (dev):** `pnpm exec tsx src/mcp/server.ts` — thường sạch stdout hơn `pnpm run mcp`, nhưng vẫn phụ thuộc PATH có `pnpm`.
 
