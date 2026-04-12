@@ -1,0 +1,25 @@
+{
+  "name": "mcp-bridge-figma",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:plugin": "node esbuild.plugin.mjs",
+    "build:mcp": "node esbuild.mcp.mjs",
+    "bridge": "tsx src/bridge/server.ts",
+    "mcp": "tsx src/mcp/server.ts",
+    "mcp:dist": "node dist-mcp/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.114.0",
+    "@types/node": "^24.12.2",
+    "esbuild": "^0.27.7",
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.2"
+  }
+}

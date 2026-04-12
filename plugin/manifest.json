@@ -1,0 +1,12 @@
+{
+  "name": "Reform MCP Bridge",
+  "id": "reform-mcp-bridge-export",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "editorType": ["figma", "figjam"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:3845"]
+  }
+}

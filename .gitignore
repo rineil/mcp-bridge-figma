@@ -1,0 +1,5 @@
+node_modules/
+exports/*.json
+plugin/dist/
+dist-mcp/
+.DS_Store

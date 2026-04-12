@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reform.local/schema/figma-bridge-export-v3",
+  "title": "Figma bridge export (phases 1–3)",
+  "type": "object",
+  "required": ["meta", "roots"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["pluginVersion", "phase", "exportedAt"],
+      "properties": {
+        "pluginVersion": { "type": "string" },
+        "phase": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "scope": { "type": "string", "enum": ["selection", "page"] },
+        "exportedAt": { "type": "string", "format": "date-time" },
+        "fileKey": { "type": ["string", "null"] },
+        "fileName": { "type": "string" },
+        "pageId": { "type": "string" },
+        "pageName": { "type": "string" },
+        "nodeCount": { "type": "integer" },
+        "maxDepth": { "type": "integer" },
+        "maxNodes": { "type": "integer" }
+      }
+    },
+    "roots": {
+      "type": "array",
+      "description": "Serialized scene nodes (recursive children)."
+    },
+    "variables": {
+      "type": ["object", "null"],
+      "description": "Present when phase >= 2: local variable collections + variables."
+    },
+    "rasters": {
+      "type": "object",
+      "description": "Present when phase 3 + plugin raster option: map nodeId -> base64 PNG.",
+      "additionalProperties": { "type": "string", "contentEncoding": "base64" }
+    }
+  },
+  "additionalProperties": true
+}
