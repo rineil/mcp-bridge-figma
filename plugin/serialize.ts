@@ -200,13 +200,16 @@ function serializeEffects(node: BlendMixin, phase: ExportPhase): unknown[] {
   });
 }
 
-function variableSnapshot(): {
+async function variableSnapshot(): Promise<{
   collections: unknown[];
   variables: unknown[];
-} | null {
+} | null> {
+  // Async variants are required: the synchronous getLocalVariableCollections/
+  // getLocalVariables throw under manifest documentAccess:"dynamic-page".
+  // The try/catch remains only for editors without a variables API (e.g. FigJam).
   try {
-    const cols = figma.variables.getLocalVariableCollections();
-    const variables = figma.variables.getLocalVariables();
+    const cols = await figma.variables.getLocalVariableCollectionsAsync();
+    const variables = await figma.variables.getLocalVariablesAsync();
     return {
       collections: cols.map((c) => ({
         id: c.id,
@@ -257,16 +260,18 @@ function styleIds(
   return Object.keys(o).length ? o : undefined;
 }
 
-function componentExtras(
+async function componentExtras(
   node: SceneNode,
   phase: ExportPhase,
-): Record<string, unknown> | undefined {
+): Promise<Record<string, unknown> | undefined> {
   if (phase < 3) {
     return undefined;
   }
   if (node.type === "INSTANCE") {
     const inst = node as InstanceNode;
-    const main = inst.mainComponent;
+    // getMainComponentAsync: the synchronous mainComponent getter throws
+    // under manifest documentAccess:"dynamic-page".
+    const main = await inst.getMainComponentAsync();
     return {
       variantProperties: inst.variantProperties,
       componentProperties: inst.componentProperties,
@@ -303,14 +308,14 @@ function getChildren(node: SceneNode): readonly SceneNode[] {
   return [];
 }
 
-export function serializeNode(
+export async function serializeNode(
   node: SceneNode,
   phase: ExportPhase,
   counter: Counter,
   depth: number,
   maxDepth: number,
   maxNodes: number,
-): unknown {
+): Promise<unknown> {
   counter.n += 1;
   if (counter.n > maxNodes) {
     return {
@@ -385,16 +390,21 @@ export function serializeNode(
     base.styleRefs = sid;
   }
 
-  const comp = componentExtras(node, phase);
+  const comp = await componentExtras(node, phase);
   if (comp) {
     base.component = comp;
   }
 
   const kids = getChildren(node);
   if (kids.length > 0) {
-    base.children = kids.map((c) =>
-      serializeNode(c, phase, counter, depth + 1, maxDepth, maxNodes),
-    );
+    // Sequential await preserves the depth-first maxNodes/maxDepth counting order.
+    const children: unknown[] = [];
+    for (const c of kids) {
+      children.push(
+        await serializeNode(c, phase, counter, depth + 1, maxDepth, maxNodes),
+      );
+    }
+    base.children = children;
   }
 
   return base;
@@ -453,9 +463,12 @@ export async function buildExportPayload(opts: {
     }
   }
 
-  const roots = rootsInput.map((n) =>
-    serializeNode(n, opts.phase, counter, 0, maxDepth, maxNodes),
-  );
+  const roots: unknown[] = [];
+  for (const n of rootsInput) {
+    roots.push(
+      await serializeNode(n, opts.phase, counter, 0, maxDepth, maxNodes),
+    );
+  }
 
   const meta: Record<string, unknown> = {
     pluginVersion: PLUGIN_VERSION,
@@ -474,7 +487,7 @@ export async function buildExportPayload(opts: {
   const payload: Record<string, unknown> = { meta, roots };
 
   if (opts.phase >= 2) {
-    payload.variables = variableSnapshot();
+    payload.variables = await variableSnapshot();
   }
 
   if (opts.phase >= 3 && Object.keys(rasters).length > 0) {
