@@ -4,7 +4,7 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.4.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
@@ -815,6 +815,44 @@ export async function serializeNode(
   return base;
 }
 
+/** Gather unique imageHash values from IMAGE paints in the serialized tree. */
+function collectImageHashes(roots: unknown[]): string[] {
+  const out = new Set<string>();
+  const visit = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const x of n) {
+        visit(x);
+      }
+      return;
+    }
+    if (!n || typeof n !== "object") {
+      return;
+    }
+    const obj = n as Record<string, unknown>;
+    if (Array.isArray(obj.fills)) {
+      for (const f of obj.fills) {
+        if (
+          f &&
+          typeof f === "object" &&
+          (f as Record<string, unknown>).type === "IMAGE"
+        ) {
+          const h = (f as Record<string, unknown>).imageHash;
+          if (typeof h === "string") {
+            out.add(h);
+          }
+        }
+      }
+    }
+    for (const v of Object.values(obj)) {
+      visit(v);
+    }
+  };
+  for (const r of roots) {
+    visit(r);
+  }
+  return [...out];
+}
+
 export async function buildExportPayload(opts: {
   phase: ExportPhase;
   scope: ExportScope;
@@ -873,6 +911,30 @@ export async function buildExportPayload(opts: {
     roots.push(
       await serializeNode(n, opts.phase, counter, 0, maxDepth, maxNodes),
     );
+  }
+
+  // Resolve IMAGE fill bytes so imageHash references become dereferenceable.
+  // Opt-in (raster checkbox), capped count + per-image size to bound payload.
+  if (opts.phase >= 3 && opts.includeRaster) {
+    const hashes = collectImageHashes(roots).slice(0, 12);
+    for (const h of hashes) {
+      if (rasters[h]) {
+        continue;
+      }
+      try {
+        const img = figma.getImageByHash(h);
+        if (!img) {
+          continue;
+        }
+        const bytes = await img.getBytesAsync();
+        if (bytes.length > 512 * 1024) {
+          continue;
+        }
+        rasters[h] = uint8ToBase64(bytes);
+      } catch {
+        /* image bytes optional */
+      }
+    }
   }
 
   const meta: Record<string, unknown> = {

@@ -33,7 +33,7 @@
     },
     "rasters": {
       "type": "object",
-      "description": "Present when phase 3 + plugin raster option: map nodeId -> base64 PNG.",
+      "description": "Present when phase 3 + plugin raster option: map key -> base64. Key is a node id (PNG of a small root node) or an image hash (raw IMAGE-fill bytes). Fetch one on demand via the figma_bridge_get_raster MCP tool.",
       "additionalProperties": { "type": "string", "contentEncoding": "base64" }
     }
   },
