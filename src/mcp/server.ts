@@ -91,10 +91,11 @@ server.registerTool(
         type: "text",
         text: JSON.stringify(
           {
-            phase1: "Scene graph: geometry, fills/strokes summary, frame auto-layout basics.",
-            phase2: "Adds local variables/collections, text & effect detail, style IDs, bound variable aliases on paints.",
+            phase1: "Per-node scene graph: bbox (with space=absolute|relative), fills/strokes (solid color 0..1, full gradient stops + transform), container auto-layout (layout) + per-node sizing & constraints (layoutSelf: layoutSizing*/grow/align/min-max, constraints), vector path geometry for shapes (geometry.fillGeometry as SVG paths), isMask/maskType, corner radii, stroke dash/cap/join.",
+            phase2: "Adds local variables/collections, text detail incl. per-range styling (text.segments from getStyledTextSegments) + fontWeight, effect detail, style IDs, bound variable aliases on paints.",
             phase3: "Adds component/variant/instance metadata, mainComponent refs, optional PNG raster (base64) for small nodes when enabled in plugin.",
-            schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma)",
+            notes: "imageHash on IMAGE fills is opaque (not a URL); icons/illustrations come through as geometry.fillGeometry SVG paths.",
+            schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
           null,
           2,

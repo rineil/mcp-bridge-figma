@@ -87,7 +87,17 @@ Công cụ:
 
 ## Schema JSON
 
-Xem `schema/export-v3.schema.json` (khung meta + roots; phase 2/3 thêm field tùy chọn).
+Xem `schema/export-v3.schema.json` — `roots[]` theo `$defs/node`. Mỗi node (plugin v0.2+) gồm:
+
+- `bbox` có `space: "absolute" | "relative"` (đừng trộn 2 hệ toạ độ).
+- `layout` — auto-layout của container (gồm `layoutGrids`).
+- `layoutSelf` — sizing/độ co giãn theo từng node: `constraints`, `layoutSizingHorizontal/Vertical` (FIXED/HUG/FILL), `layoutGrow`, `layoutAlign`, `min/maxWidth/Height`.
+- `fills`/`strokes` — gradient lưu **đầy đủ stops + `gradientTransform`**; stroke có `dashPattern`/`strokeCap`/`strokeJoin`.
+- `geometry` — vector path (`fillGeometry`/`strokeGeometry` dạng SVG path) cho VECTOR/BOOLEAN_OPERATION/LINE/POLYGON/STAR → dựng lại icon bằng `<path d>`.
+- `text.segments` (phase ≥ 2) — style theo từng đoạn (đậm/màu/cỡ riêng) thay vì gộp thành `"mixed"`; thêm `fontWeight`.
+- `isMask`/`maskType`.
+
+Phase 2/3 vẫn thêm field tùy chọn (variables, component/variant, raster).
 
 ## Lưu ý
 
