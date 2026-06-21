@@ -91,10 +91,10 @@ server.registerTool(
         type: "text",
         text: JSON.stringify(
           {
-            phase1: "Per-node scene graph: bbox (with space=absolute|relative), fills/strokes (solid color 0..1, full gradient stops + transform), container auto-layout (layout) + per-node sizing & constraints (layoutSelf: layoutSizing*/grow/align/min-max, constraints), vector path geometry for shapes (geometry.fillGeometry as SVG paths), isMask/maskType, corner radii, stroke dash/cap/join.",
-            phase2: "Adds local variables/collections, text detail incl. per-range styling (text.segments from getStyledTextSegments) + fontWeight, effect detail, style IDs, bound variable aliases on paints.",
+            phase1: "Per-node scene graph: bbox (space=absolute|relative) + `rel` (parent-relative CSS-ready box), fills/strokes (color 0..1 + `cssColor` #hex/rgba, full gradient stops, IMAGE imageHash), container auto-layout (layout, incl. `layout.css` ready flexbox) + per-node sizing/constraints (layoutSelf), vector path geometry (geometry.fillGeometry as SVG paths), isMask/maskType, corner radii, stroke dash/cap/join.",
+            phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight; effect detail (shadow cssColor); style IDs.",
             phase3: "Adds component/variant/instance metadata, mainComponent refs, optional PNG raster (base64) for small nodes when enabled in plugin.",
-            notes: "imageHash on IMAGE fills is opaque (not a URL); icons/illustrations come through as geometry.fillGeometry SVG paths.",
+            notes: "Colors are pre-resolved to cssColor — use those directly. imageHash on IMAGE fills is opaque (not a URL); icons come through as geometry.fillGeometry SVG paths.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
           null,
