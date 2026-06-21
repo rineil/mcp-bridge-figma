@@ -4,7 +4,7 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.3.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
@@ -19,6 +19,26 @@ function uint8ToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...sub);
   }
   return btoa(binary);
+}
+
+function clampChannel(n: number): number {
+  return Math.max(0, Math.min(255, Math.round(n * 255)));
+}
+
+function hex2(n: number): string {
+  return clampChannel(n).toString(16).padStart(2, "0");
+}
+
+/** Figma color {r,g,b} 0..1 (+ optional a / layer opacity) -> CSS hex or rgba(). */
+function cssColor(
+  c: { r: number; g: number; b: number; a?: number },
+  opacity = 1,
+): string {
+  const a = (typeof c.a === "number" ? c.a : 1) * opacity;
+  if (a >= 0.999) {
+    return `#${hex2(c.r)}${hex2(c.g)}${hex2(c.b)}`;
+  }
+  return `rgba(${clampChannel(c.r)}, ${clampChannel(c.g)}, ${clampChannel(c.b)}, ${Math.round(a * 1000) / 1000})`;
 }
 
 function bbox(node: SceneNode): {
@@ -77,6 +97,7 @@ function serializePaint(
     o.opacity = paint.opacity;
     if (paint.color) {
       o.color = paint.color;
+      o.cssColor = cssColor(paint.color, paint.opacity ?? 1);
     }
     if (phase >= 2 && "boundVariables" in paint && paint.boundVariables) {
       o.boundVariables = serializeBoundVars(
@@ -93,6 +114,7 @@ function serializePaint(
       paint.gradientStops?.map((s) => ({
         position: s.position,
         color: s.color,
+        cssColor: cssColor(s.color),
       })) ?? [];
     o.gradientTransform = paint.gradientTransform;
     if (phase >= 2 && "boundVariables" in paint && paint.boundVariables) {
@@ -129,6 +151,41 @@ function serializeStrokes(
   return strokes.map((p) => serializePaint(p, phase));
 }
 
+/** Map Figma auto-layout onto a ready-to-use flexbox style block. */
+function autoLayoutCss(n: FrameNode): Record<string, unknown> | undefined {
+  if (n.layoutMode === "NONE") {
+    return undefined;
+  }
+  const justify: Record<string, string> = {
+    MIN: "flex-start",
+    CENTER: "center",
+    MAX: "flex-end",
+    SPACE_BETWEEN: "space-between",
+  };
+  const align: Record<string, string> = {
+    MIN: "flex-start",
+    CENTER: "center",
+    MAX: "flex-end",
+    BASELINE: "baseline",
+  };
+  const css: Record<string, unknown> = {
+    display: "flex",
+    flexDirection: n.layoutMode === "HORIZONTAL" ? "row" : "column",
+    justifyContent: justify[n.primaryAxisAlignItems] ?? "flex-start",
+    alignItems: align[n.counterAxisAlignItems] ?? "flex-start",
+  };
+  if (n.itemSpacing) {
+    css.gap = `${n.itemSpacing}px`;
+  }
+  if (n.paddingTop || n.paddingRight || n.paddingBottom || n.paddingLeft) {
+    css.padding = `${n.paddingTop}px ${n.paddingRight}px ${n.paddingBottom}px ${n.paddingLeft}px`;
+  }
+  if ("layoutWrap" in n && n.layoutWrap === "WRAP") {
+    css.flexWrap = "wrap";
+  }
+  return css;
+}
+
 function layoutExtras(node: SceneNode): Record<string, unknown> | undefined {
   if (
     node.type !== "FRAME" &&
@@ -157,6 +214,10 @@ function layoutExtras(node: SceneNode): Record<string, unknown> | undefined {
   }
   if (n.layoutGrids && n.layoutGrids.length > 0) {
     o.layoutGrids = n.layoutGrids;
+  }
+  const css = autoLayoutCss(n);
+  if (css) {
+    o.css = css;
   }
   return o;
 }
@@ -316,6 +377,7 @@ function serializeEffects(node: BlendMixin, phase: ExportPhase): unknown[] {
     };
     if (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW") {
       base.color = e.color;
+      base.cssColor = cssColor(e.color);
       base.offset = e.offset;
       base.radius = e.radius;
       base.spread = e.spread;
@@ -357,6 +419,176 @@ async function variableSnapshot(): Promise<{
   } catch {
     return null;
   }
+}
+
+type RawVar = {
+  id: string;
+  name: string;
+  resolvedType: string;
+  variableCollectionId: string;
+  valuesByMode: Record<string, unknown>;
+};
+type RawCol = { id: string; name: string; defaultModeId: string };
+type VarSnapshot = { collections: unknown[]; variables: unknown[] };
+
+function isAlias(v: unknown): v is { type: "VARIABLE_ALIAS"; id: string } {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    (v as { type?: unknown }).type === "VARIABLE_ALIAS" &&
+    typeof (v as { id?: unknown }).id === "string"
+  );
+}
+
+/** Resolve a variable to its default-mode value, following alias chains. */
+function resolveVar(
+  id: string,
+  varsById: Map<string, RawVar>,
+  colsById: Map<string, RawCol>,
+  depth = 0,
+): { value: unknown; cssColor?: string } | null {
+  if (depth > 8) {
+    return null;
+  }
+  const v = varsById.get(id);
+  if (!v) {
+    return null;
+  }
+  const col = colsById.get(v.variableCollectionId);
+  const modeId =
+    col && col.defaultModeId in v.valuesByMode
+      ? col.defaultModeId
+      : Object.keys(v.valuesByMode)[0];
+  const val = modeId ? v.valuesByMode[modeId] : undefined;
+  if (isAlias(val)) {
+    return resolveVar(val.id, varsById, colsById, depth + 1);
+  }
+  const out: { value: unknown; cssColor?: string } = { value: val };
+  if (
+    v.resolvedType === "COLOR" &&
+    val &&
+    typeof val === "object" &&
+    "r" in (val as Record<string, unknown>)
+  ) {
+    out.cssColor = cssColor(
+      val as { r: number; g: number; b: number; a?: number },
+    );
+  }
+  return out;
+}
+
+/** Collect every variable id nested under a value (alias objects). */
+function collectVarIds(value: unknown, into: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      collectVarIds(v, into);
+    }
+    return;
+  }
+  if (isAlias(value)) {
+    into.add(value.id);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      collectVarIds(v, into);
+    }
+  }
+}
+
+/**
+ * Attach resolved `tokens` onto paints that bind variables, collect every
+ * referenced variable id, and return a COMPACT token table (referenced-only,
+ * with default-mode value + cssColor) to replace the full variable dump.
+ */
+function resolveTokens(roots: unknown[], snapshot: VarSnapshot): VarSnapshot {
+  const rawVars = snapshot.variables as RawVar[];
+  const rawCols = snapshot.collections as RawCol[];
+  const varsById = new Map(rawVars.map((v) => [v.id, v] as const));
+  const colsById = new Map(rawCols.map((c) => [c.id, c] as const));
+  const referenced = new Set<string>();
+
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const n of node) {
+        walk(n);
+      }
+      return;
+    }
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    const bv = obj.boundVariables;
+    if (bv && typeof bv === "object") {
+      const tokens: Record<string, unknown> = {};
+      for (const [field, ref] of Object.entries(bv as Record<string, unknown>)) {
+        if (typeof ref === "string") {
+          referenced.add(ref);
+          const v = varsById.get(ref);
+          const r = resolveVar(ref, varsById, colsById);
+          tokens[field] = {
+            id: ref,
+            name: v?.name,
+            collection: v
+              ? colsById.get(v.variableCollectionId)?.name
+              : undefined,
+            value: r?.value,
+            cssColor: r?.cssColor,
+          };
+        } else {
+          collectVarIds(ref, referenced);
+        }
+      }
+      if (Object.keys(tokens).length > 0) {
+        obj.tokens = tokens;
+      }
+    }
+    for (const v of Object.values(obj)) {
+      walk(v);
+    }
+  };
+  for (const r of roots) {
+    walk(r);
+  }
+
+  // Pull in alias targets of referenced variables until the set is stable.
+  for (let pass = 0; pass < 16; pass++) {
+    const before = referenced.size;
+    for (const id of [...referenced]) {
+      const v = varsById.get(id);
+      if (!v) {
+        continue;
+      }
+      for (const val of Object.values(v.valuesByMode)) {
+        collectVarIds(val, referenced);
+      }
+    }
+    if (referenced.size === before) {
+      break;
+    }
+  }
+
+  const variables = rawVars
+    .filter((v) => referenced.has(v.id))
+    .map((v) => {
+      const r = resolveVar(v.id, varsById, colsById);
+      return {
+        id: v.id,
+        name: v.name,
+        resolvedType: v.resolvedType,
+        collection: colsById.get(v.variableCollectionId)?.name,
+        variableCollectionId: v.variableCollectionId,
+        value: r?.value,
+        cssColor: r?.cssColor,
+        valuesByMode: v.valuesByMode,
+      };
+    });
+  const usedCols = new Set(variables.map((v) => v.variableCollectionId));
+  const collections = (snapshot.collections as Array<{ id: string }>).filter(
+    (c) => usedCols.has(c.id),
+  );
+  return { collections, variables };
 }
 
 function styleIds(
@@ -473,6 +705,23 @@ export async function serializeNode(
     blendMode: "blendMode" in node ? node.blendMode : undefined,
     bbox: bbox(node),
   };
+
+  // Parent-relative box: CSS-ready left/top/width/height for absolute children,
+  // so consumers don't have to subtract the parent's absolute origin themselves.
+  const abs = node.absoluteBoundingBox;
+  const par = node.parent;
+  const parAbs =
+    par && "absoluteBoundingBox" in par
+      ? (par as { absoluteBoundingBox: Rect | null }).absoluteBoundingBox
+      : null;
+  if (abs && parAbs) {
+    base.rel = {
+      x: abs.x - parAbs.x,
+      y: abs.y - parAbs.y,
+      width: abs.width,
+      height: abs.height,
+    };
+  }
 
   if ("isMask" in node && node.isMask) {
     base.isMask = true;
@@ -643,7 +892,18 @@ export async function buildExportPayload(opts: {
   const payload: Record<string, unknown> = { meta, roots };
 
   if (opts.phase >= 2) {
-    payload.variables = await variableSnapshot();
+    const snapshot = await variableSnapshot();
+    if (snapshot) {
+      try {
+        // Replace the full dump with a resolved, referenced-only token table and
+        // attach per-paint `tokens`. Fall back to the raw snapshot on any error.
+        payload.variables = resolveTokens(roots, snapshot);
+      } catch {
+        payload.variables = snapshot;
+      }
+    } else {
+      payload.variables = null;
+    }
   }
 
   if (opts.phase >= 3 && Object.keys(rasters).length > 0) {

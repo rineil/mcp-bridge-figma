@@ -29,7 +29,7 @@
     },
     "variables": {
       "type": ["object", "null"],
-      "description": "Present when phase >= 2: local variable collections + variables."
+      "description": "Present when phase >= 2: COMPACT, referenced-only token table. Each variable is resolved to its default-mode `value` (+ `cssColor` for COLOR). Paints that bind a variable also carry a resolved `tokens` map at the paint."
     },
     "rasters": {
       "type": "object",
@@ -66,6 +66,16 @@
             "space": { "type": "string", "enum": ["absolute", "relative"] }
           }
         },
+        "rel": {
+          "type": "object",
+          "description": "Parent-relative box (child absolute minus parent absolute) — CSS-ready left/top/width/height for absolutely-positioned children.",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "width": { "type": "number" },
+            "height": { "type": "number" }
+          }
+        },
         "cornerRadius": { "type": "number" },
         "rectangleCornerRadii": {
           "type": "array",
@@ -74,17 +84,17 @@
         },
         "isMask": { "type": "boolean" },
         "maskType": { "type": "string" },
-        "fills": { "type": "array", "description": "Paints. SOLID has color {r,g,b} 0..1 + opacity. GRADIENT_* has gradientStops[{position,color}] + gradientTransform. IMAGE has imageHash (opaque, not a URL) + scaleMode." },
+        "fills": { "type": "array", "description": "Paints. SOLID has color {r,g,b} 0..1 + `cssColor` (#hex/rgba, opacity folded in). GRADIENT_* has gradientStops[{position,color,cssColor}] + gradientTransform. IMAGE has imageHash (opaque, not a URL) + scaleMode. A paint that binds a variable also has `tokens` (field -> {id,name,collection,value,cssColor})." },
         "strokes": { "type": "array" },
         "strokeWeight": { "type": "number" },
         "strokeAlign": { "type": "string" },
         "dashPattern": { "type": "array", "items": { "type": "number" } },
         "strokeCap": { "type": "string" },
         "strokeJoin": { "type": "string" },
-        "effects": { "type": "array", "description": "Shadows/blurs. Detail (color/offset/radius/spread) added at phase >= 2." },
+        "effects": { "type": "array", "description": "Shadows/blurs. At phase >= 2, shadows add color/cssColor/offset/radius/spread." },
         "layout": {
           "type": "object",
-          "description": "Container auto-layout (FRAME/COMPONENT/INSTANCE): layoutMode, sizing modes, align, padding, itemSpacing, layoutWrap, layoutGrids."
+          "description": "Container auto-layout (FRAME/COMPONENT/INSTANCE): layoutMode, sizing modes, align, padding, itemSpacing, layoutWrap, layoutGrids, and `css` — a ready flexbox block (display/flexDirection/justifyContent/alignItems/gap/padding/flexWrap)."
         },
         "layoutSelf": {
           "type": "object",
