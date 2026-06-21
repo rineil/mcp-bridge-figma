@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://reform.local/schema/figma-bridge-export-v3",
-  "title": "Figma bridge export (phases 1–3)",
+  "title": "Figma bridge export (phases 1–3, plugin v0.2+)",
   "type": "object",
   "required": ["meta", "roots"],
   "properties": {
@@ -24,7 +24,8 @@
     },
     "roots": {
       "type": "array",
-      "description": "Serialized scene nodes (recursive children)."
+      "description": "Serialized scene nodes (recursive children).",
+      "items": { "$ref": "#/$defs/node" }
     },
     "variables": {
       "type": ["object", "null"],
@@ -36,5 +37,91 @@
       "additionalProperties": { "type": "string", "contentEncoding": "base64" }
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "$defs": {
+    "node": {
+      "type": "object",
+      "description": "One serialized scene node. additionalProperties is true: fields are present only when meaningful for the node type/phase.",
+      "required": ["id", "type", "name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "description": "Figma node type, e.g. FRAME, TEXT, VECTOR, INSTANCE." },
+        "name": { "type": "string" },
+        "visible": { "type": "boolean" },
+        "locked": { "type": "boolean" },
+        "opacity": { "type": "number" },
+        "blendMode": { "type": "string" },
+        "rotation": { "type": "number", "description": "Degrees, Figma convention (counter-clockwise positive)." },
+        "omitted": { "type": "boolean", "description": "Node was truncated; see `reason` (maxNodes/maxDepth)." },
+        "reason": { "type": "string" },
+        "bbox": {
+          "type": ["object", "null"],
+          "description": "Bounding box. `space:absolute` = page coordinates (from absoluteBoundingBox). `space:relative` = parent-relative fallback (x/y of LayoutMixin). Never mix the two spaces.",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "width": { "type": "number" },
+            "height": { "type": "number" },
+            "space": { "type": "string", "enum": ["absolute", "relative"] }
+          }
+        },
+        "cornerRadius": { "type": "number" },
+        "rectangleCornerRadii": {
+          "type": "array",
+          "description": "[topLeft, topRight, bottomRight, bottomLeft] when corners differ.",
+          "items": { "type": "number" }
+        },
+        "isMask": { "type": "boolean" },
+        "maskType": { "type": "string" },
+        "fills": { "type": "array", "description": "Paints. SOLID has color {r,g,b} 0..1 + opacity. GRADIENT_* has gradientStops[{position,color}] + gradientTransform. IMAGE has imageHash (opaque, not a URL) + scaleMode." },
+        "strokes": { "type": "array" },
+        "strokeWeight": { "type": "number" },
+        "strokeAlign": { "type": "string" },
+        "dashPattern": { "type": "array", "items": { "type": "number" } },
+        "strokeCap": { "type": "string" },
+        "strokeJoin": { "type": "string" },
+        "effects": { "type": "array", "description": "Shadows/blurs. Detail (color/offset/radius/spread) added at phase >= 2." },
+        "layout": {
+          "type": "object",
+          "description": "Container auto-layout (FRAME/COMPONENT/INSTANCE): layoutMode, sizing modes, align, padding, itemSpacing, layoutWrap, layoutGrids."
+        },
+        "layoutSelf": {
+          "type": "object",
+          "description": "Per-node responsive sizing. constraints {horizontal,vertical} for absolute children; layoutSizingHorizontal/Vertical (FIXED|HUG|FILL), layoutGrow, layoutAlign, min/maxWidth/Height for auto-layout participants.",
+          "properties": {
+            "constraints": { "type": "object" },
+            "layoutSizingHorizontal": { "type": "string" },
+            "layoutSizingVertical": { "type": "string" },
+            "layoutGrow": { "type": "number" },
+            "layoutAlign": { "type": "string" },
+            "minWidth": { "type": "number" },
+            "maxWidth": { "type": "number" },
+            "minHeight": { "type": "number" },
+            "maxHeight": { "type": "number" }
+          }
+        },
+        "text": {
+          "type": "object",
+          "description": "TEXT nodes. Node-level fields plus, at phase >= 2, `segments` (per-range styling from getStyledTextSegments so bold/colored/sized runs survive) and `fontWeight`."
+        },
+        "geometry": {
+          "type": "object",
+          "description": "Vector shapes (VECTOR/BOOLEAN_OPERATION/LINE/POLYGON/STAR): fillGeometry/strokeGeometry are SVG path lists [{windingRule,data}] re-emittable as <path d>. booleanOperation on BOOLEAN_OPERATION nodes."
+        },
+        "styleRefs": {
+          "type": "object",
+          "description": "phase >= 2: fillStyleId/strokeStyleId/effectStyleId references (IDs only; the styles themselves are not serialized)."
+        },
+        "component": {
+          "type": "object",
+          "description": "phase 3: INSTANCE variant/component properties + mainComponent ref; COMPONENT/COMPONENT_SET property definitions."
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        }
+      }
+    }
+  }
 }

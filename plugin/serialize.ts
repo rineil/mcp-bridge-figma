@@ -4,7 +4,7 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.2.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
@@ -21,20 +21,28 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function bbox(
-  node: SceneNode,
-): { x: number; y: number; width: number; height: number } | null {
+function bbox(node: SceneNode): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  space: "absolute" | "relative";
+} | null {
   const b = node.absoluteBoundingBox;
   if (b) {
-    return { x: b.x, y: b.y, width: b.width, height: b.height };
+    return { x: b.x, y: b.y, width: b.width, height: b.height, space: "absolute" };
   }
   if ("width" in node && "height" in node) {
+    // Fallback: x/y here are PARENT-RELATIVE (LayoutMixin), unlike the
+    // page-absolute absoluteBoundingBox above — flag the space so consumers
+    // never mix the two coordinate systems.
     const g = node as LayoutMixin;
     return {
       x: "x" in node ? (node as LayoutMixin).x : 0,
       y: "y" in node ? (node as LayoutMixin).y : 0,
       width: g.width,
       height: g.height,
+      space: "relative",
     };
   }
   return null;
@@ -81,7 +89,12 @@ function serializePaint(
     paint.type === "GRADIENT_ANGULAR" ||
     paint.type === "GRADIENT_DIAMOND"
   ) {
-    o.gradientStops = paint.gradientStops?.length ?? 0;
+    o.gradientStops =
+      paint.gradientStops?.map((s) => ({
+        position: s.position,
+        color: s.color,
+      })) ?? [];
+    o.gradientTransform = paint.gradientTransform;
     if (phase >= 2 && "boundVariables" in paint && paint.boundVariables) {
       o.boundVariables = JSON.parse(
         JSON.stringify(paint.boundVariables),
@@ -142,7 +155,119 @@ function layoutExtras(node: SceneNode): Record<string, unknown> | undefined {
   if ("layoutWrap" in n) {
     o.layoutWrap = n.layoutWrap;
   }
+  if (n.layoutGrids && n.layoutGrids.length > 0) {
+    o.layoutGrids = n.layoutGrids;
+  }
   return o;
+}
+
+/**
+ * Per-node responsive/sizing info: layout constraints (for absolutely-positioned
+ * children) and modern auto-layout child sizing (FILL/HUG/FIXED, grow, align,
+ * min/max). These live on the child node, not the parent.
+ */
+function layoutSelf(node: SceneNode): Record<string, unknown> | undefined {
+  const o: Record<string, unknown> = {};
+
+  if ("constraints" in node) {
+    o.constraints = (node as ConstraintMixin).constraints;
+  }
+
+  // layoutSizing*/grow/align are only valid to read when the node participates
+  // in auto-layout (is itself an auto-layout frame, or a direct child of one).
+  const parent = node.parent;
+  const parentAuto =
+    !!parent &&
+    "layoutMode" in parent &&
+    (parent as BaseFrameMixin).layoutMode !== "NONE";
+  const selfAuto =
+    "layoutMode" in node && (node as BaseFrameMixin).layoutMode !== "NONE";
+  if ((parentAuto || selfAuto) && "layoutSizingHorizontal" in node) {
+    const ln = node as LayoutMixin;
+    o.layoutSizingHorizontal = ln.layoutSizingHorizontal;
+    o.layoutSizingVertical = ln.layoutSizingVertical;
+    o.layoutGrow = ln.layoutGrow;
+    o.layoutAlign = ln.layoutAlign;
+  }
+
+  for (const k of ["minWidth", "maxWidth", "minHeight", "maxHeight"] as const) {
+    if (k in node) {
+      const v = (node as unknown as Record<string, unknown>)[k];
+      if (v != null) {
+        o[k] = v;
+      }
+    }
+  }
+
+  return Object.keys(o).length ? o : undefined;
+}
+
+/**
+ * Vector path geometry for shape nodes (icons, illustrations). fillGeometry is a
+ * list of SVG-path strings an agent can re-emit as inline <path d="…">.
+ */
+function vectorGeometry(node: SceneNode): Record<string, unknown> | undefined {
+  if (
+    node.type !== "VECTOR" &&
+    node.type !== "BOOLEAN_OPERATION" &&
+    node.type !== "LINE" &&
+    node.type !== "POLYGON" &&
+    node.type !== "STAR"
+  ) {
+    return undefined;
+  }
+  const o: Record<string, unknown> = {};
+  if ("fillGeometry" in node) {
+    const g = node as GeometryMixin;
+    o.fillGeometry = g.fillGeometry;
+    if (g.strokeGeometry && g.strokeGeometry.length > 0) {
+      o.strokeGeometry = g.strokeGeometry;
+    }
+  }
+  if (node.type === "BOOLEAN_OPERATION") {
+    o.booleanOperation = node.booleanOperation;
+  }
+  return Object.keys(o).length ? o : undefined;
+}
+
+/** Per-range text styling so bold/colored/sized runs survive (vs. node-level "mixed"). */
+function styledTextSegments(node: TextNode): unknown[] {
+  try {
+    const segs = node.getStyledTextSegments([
+      "fontName",
+      "fontSize",
+      "fontWeight",
+      "textCase",
+      "textDecoration",
+      "lineHeight",
+      "letterSpacing",
+      "fills",
+      "textStyleId",
+      "fillStyleId",
+      "hyperlink",
+    ]);
+    return segs.map((s) => ({
+      start: s.start,
+      end: s.end,
+      characters:
+        s.characters.length > TEXT_CAP
+          ? `${s.characters.slice(0, TEXT_CAP)}…`
+          : s.characters,
+      fontName: s.fontName,
+      fontSize: s.fontSize,
+      fontWeight: s.fontWeight,
+      textCase: s.textCase,
+      textDecoration: s.textDecoration,
+      lineHeight: s.lineHeight,
+      letterSpacing: s.letterSpacing,
+      fills: s.fills,
+      textStyleId: s.textStyleId,
+      fillStyleId: s.fillStyleId,
+      hyperlink: s.hyperlink,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function textExtras(
@@ -170,6 +295,8 @@ function textExtras(
       node.textDecoration === figma.mixed ? "mixed" : node.textDecoration;
     o.textStyleId =
       node.textStyleId === figma.mixed ? "mixed" : node.textStyleId;
+    o.fontWeight = node.fontWeight === figma.mixed ? "mixed" : node.fontWeight;
+    o.segments = styledTextSegments(node);
   }
   return o;
 }
@@ -347,6 +474,13 @@ export async function serializeNode(
     bbox: bbox(node),
   };
 
+  if ("isMask" in node && node.isMask) {
+    base.isMask = true;
+    if ("maskType" in node) {
+      base.maskType = (node as { maskType?: string }).maskType;
+    }
+  }
+
   if ("rotation" in node) {
     base.rotation = node.rotation;
   }
@@ -372,11 +506,28 @@ export async function serializeNode(
         ? node.strokeWeight
         : undefined;
     base.strokeAlign = "strokeAlign" in node ? node.strokeAlign : undefined;
+    if ("dashPattern" in node) {
+      const s = node as MinimalStrokesMixin;
+      if (s.dashPattern.length > 0) {
+        base.dashPattern = s.dashPattern;
+      }
+      if ("strokeCap" in s && s.strokeCap !== figma.mixed) {
+        base.strokeCap = s.strokeCap;
+      }
+      if (s.strokeJoin !== figma.mixed) {
+        base.strokeJoin = s.strokeJoin;
+      }
+    }
   }
 
   const le = layoutExtras(node);
   if (le) {
     base.layout = le;
+  }
+
+  const ls = layoutSelf(node);
+  if (ls) {
+    base.layoutSelf = ls;
   }
 
   if (node.type === "TEXT") {
@@ -393,6 +544,11 @@ export async function serializeNode(
   const comp = await componentExtras(node, phase);
   if (comp) {
     base.component = comp;
+  }
+
+  const vec = vectorGeometry(node);
+  if (vec) {
+    base.geometry = vec;
   }
 
   const kids = getChildren(node);
