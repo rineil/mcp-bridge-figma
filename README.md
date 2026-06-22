@@ -1,22 +1,50 @@
 # mcp-bridge-figma
 
-Luồng: **Figma plugin** `POST` JSON → **HTTP bridge** (ghi file vào `exports/`) → **MCP stdio** (`figma_bridge_*`) đọc file đó.
+Export thiết kế Figma ra **JSON cục bộ** để Claude / Cursor dựng lại UI/Frontend **đúng theo thông số thiết kế** — không cần trả phí cho Figma Dev Mode MCP.
+
+```
+┌──────────────┐   POST /export    ┌──────────────┐   đọc file   ┌──────────────┐
+│ Figma plugin │ ────────────────► │  HTTP bridge │ ───────────► │  MCP (stdio) │ ──► Claude / Cursor
+│  (serialize) │   + X-Bridge-Token│ ghi exports/ │   *.json     │ figma_bridge_*│
+└──────────────┘                   └──────────────┘              └──────────────┘
+```
+
+## Đây là gì & vì sao có nó
+
+Bạn muốn AI (Claude Code / Cursor) sinh code Frontend bám sát file Figma, nhưng:
+
+- **Figma REST API**: miễn phí về mặt token, **nhưng** gói Starter bị giới hạn **~6 request/tháng/file** → không dùng lặp được cho design-to-code.
+- **Figma Dev Mode MCP Server**: cần **ghế Dev/Full trả phí**.
+
+Plugin (chạy ngay trong Figma) là con đường **miễn phí** duy nhất khả thi: không bị rate limit, đọc được **cả file nháp/local**, lấy được **giá trị đã resolve** + xuất raster tại chỗ. Tool này serialize scene graph thành JSON, đẩy qua một bridge HTTP cục bộ, rồi expose cho AI qua MCP.
+
+> Đây là **dữ liệu cục bộ** (snapshot đã export), không thay thế Figma REST API hay quota gói Figma.
 
 ## Yêu cầu
 
 - Node 20+
 - [pnpm](https://pnpm.io/)
+- Figma (desktop hoặc web) để import plugin dạng development
 
-## Cài đặt
+## Bắt đầu nhanh (TL;DR)
 
 ```bash
+# 1. Cài + build
 cd mcp-bridge-figma
 pnpm install
-pnpm build:plugin
-pnpm build:mcp
+pnpm build:plugin   # -> plugin/dist/code.js
+pnpm build:mcp      # -> dist-mcp/server.js
+
+# 2. Chạy bridge (để chạy nền, mở terminal riêng)
+pnpm bridge         # in ra: [figma-bridge] token: <hex>  → copy token này
 ```
 
-`build:mcp` tạo `dist-mcp/server.js` — **nên dùng cho Cursor MCP** (chỉ `node`, không nhiễu stdout).
+3. **Figma → Plugins → Development → Import plugin from manifest…** → chọn `plugin/manifest.json`.
+4. Chạy plugin **Reform MCP Bridge**, **dán Bridge token** vừa copy, chọn phase/scope, bấm **Export → bridge**. File JSON xuất hiện trong `exports/`.
+5. Cấu hình MCP trong Cursor/Claude (xem [mục 3](#3-mcp-trong-cursor--claude)) trỏ tới `dist-mcp/server.js`.
+6. Bảo AI: *“dùng `figma_bridge_export_outline` rồi `read_node` để dựng lại màn hình mới nhất”*.
+
+---
 
 ## 1) Chạy bridge (HTTP)
 
@@ -26,13 +54,13 @@ pnpm bridge
 
 Mặc định: `http://localhost:3845` — `GET /health` (mở), `POST /export` (**cần token**).
 
-Khi chạy, bridge in ra dòng:
+Khi chạy, bridge in ra:
 
 ```
 [figma-bridge] token: <chuỗi hex>
 ```
 
-**Dán token này vào ô "Bridge token" trong plugin** (plugin lưu lại qua `clientStorage`, chỉ phải dán 1 lần). `POST /export` không kèm header `X-Bridge-Token` đúng → `401`. Mục đích: một trang web bất kỳ (hoặc tiến trình local khác) không thể ghi JSON tùy ý vào `exports/` để đầu độc dữ liệu mà agent đọc.
+**Dán token này vào ô "Bridge token" trong plugin** (plugin lưu lại qua `clientStorage`, chỉ phải dán 1 lần). `POST /export` không kèm header `X-Bridge-Token` đúng → `401`. Mục đích bảo mật: một trang web bất kỳ bạn mở (hoặc tiến trình local khác) **không thể** ghi JSON tùy ý vào `exports/` để đầu độc dữ liệu mà agent đọc.
 
 Biến môi trường:
 
@@ -46,7 +74,7 @@ Biến môi trường:
 
 > **Cổng 3845 trùng cổng mặc định của Figma Dev Mode MCP Server.** Nếu bạn chạy cả hai, đặt `BRIDGE_PORT` (và sửa `devAllowedDomains` trong manifest cho khớp).
 
-**Localhost / import manifest:** Figma không cho để `http://localhost:…` trong `allowedDomains` mà không có `reasoning`, và khuyên dùng `devAllowedDomains` cho server dev. Manifest dùng `allowedDomains: ["none"]` + `devAllowedDomains` (cổng 3845) để import được và `fetch` tới bridge **khi chạy plugin dạng development** (import từ manifest). Nếu đổi cổng, sửa cả hai URL trong `devAllowedDomains` cho khớp.
+**Localhost / import manifest:** Figma không cho để `http://localhost:…` trong `allowedDomains` mà không có `reasoning`, và khuyên dùng `devAllowedDomains` cho server dev. Manifest dùng `allowedDomains: ["none"]` + `devAllowedDomains` (cổng 3845) để import được và `fetch` tới bridge **khi chạy plugin dạng development**. Nếu đổi cổng, sửa cả hai URL trong `devAllowedDomains` cho khớp.
 
 ## 2) Nạp plugin trong Figma
 
@@ -56,7 +84,17 @@ Biến môi trường:
 
 File JSON xuất hiện trong `mcp-bridge-figma/exports/`.
 
-## 3) MCP trong Cursor
+### Phase nào lấy gì?
+
+| Phase | Nội dung | Khi nào dùng |
+|-------|----------|--------------|
+| **1** | Cây node + hình học: bbox/rel, fills/strokes (kèm `cssColor`), auto-layout (+ `layout.css` flexbox) & sizing per-node, vector path (icon→SVG), mask, bo góc, nét đứt | Dựng layout nhanh, file nhẹ |
+| **2** | + Bảng **design tokens** đã resolve (`variables` gọn + `tokens` tại paint), text per-segment + `fontWeight`, chi tiết effect | Dựng đúng màu/spacing theo token (khuyên dùng) |
+| **3** | + Metadata component/variant/instance, + tuỳ chọn **raster PNG** + byte ảnh (`getImageByHash`) | Cần component & ảnh thật |
+
+`Scope`: **Selection** (các layer đang chọn) hoặc **Toàn bộ page**.
+
+## 3) MCP trong Cursor / Claude
 
 **Khuyến nghị (ổn định nhất):** sau `pnpm build:mcp`, chạy file bundle — **không** qua `pnpm run …` (pnpm hay in lifecycle ra **stdout** → parser MCP lỗi → `Connection closed` / `-32000`).
 
@@ -68,22 +106,20 @@ File JSON xuất hiện trong `mcp-bridge-figma/exports/`.
       "args": [
         "path/to/mcp-bridge-figma/dist-mcp/server.js"
       ],
-      "cwd": "path/to/reform/mcp-bridge-figma",
+      "cwd": "path/to/mcp-bridge-figma",
       "env": {
-        "FIGMA_EXPORT_DIR": "path/to/reform/mcp-bridge-figma/exports"
+        "FIGMA_EXPORT_DIR": "path/to/mcp-bridge-figma/exports"
       }
     }
   }
 }
 ```
 
-Đổi các đường dẫn `path/to...` thành đúng máy bạn. **Dùng đường dẫn tuyệt đối trong `args`** (tới `dist-mcp/server.js`): một số bản Cursor không áp dụng `cwd` khi spawn `node`, nên `dist-mcp/server.js` tương đối bị resolve thành **`$HOME/dist-mcp/server.js`** → lỗi `Cannot find module '/Users/<bạn>/dist-mcp/server.js'`.
+Đổi các đường dẫn `path/to...` thành đúng máy bạn. **Dùng đường dẫn tuyệt đối trong `args`** (tới `dist-mcp/server.js`): một số bản Cursor không áp dụng `cwd` khi spawn `node`, nên đường dẫn tương đối bị resolve thành **`$HOME/dist-mcp/server.js`** → lỗi `Cannot find module …`.
 
-**Tuỳ chọn (dev):** `pnpm exec tsx src/mcp/server.ts` — thường sạch stdout hơn `pnpm run mcp`, nhưng vẫn phụ thuộc PATH có `pnpm`.
+**Tuỳ chọn (dev):** `pnpm exec tsx src/mcp/server.ts` — thường sạch stdout hơn `pnpm run mcp`, nhưng vẫn phụ thuộc PATH có `pnpm`. **Tránh** `"args": ["mcp"]` hoặc `pnpm run mcp` trong cấu hình MCP.
 
-**Tránh:** `"args": ["mcp"]` hoặc `pnpm run mcp` trong cấu hình MCP.
-
-Sau khi đổi cấu hình: reload MCP / restart Cursor. Nếu vẫn lỗi, trong terminal kiểm tra:
+Sau khi đổi cấu hình: reload MCP / restart Cursor. Nếu vẫn lỗi, kiểm tra stdout sạch:
 
 ```bash
 cd mcp-bridge-figma && pnpm build:mcp && echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' | node dist-mcp/server.js | head -c 1
@@ -91,34 +127,79 @@ cd mcp-bridge-figma && pnpm build:mcp && echo '{"jsonrpc":"2.0","id":1,"method":
 
 Ký tự đầu phải là `{` (không được xuống dòng hay `>` trước đó).
 
-Công cụ:
+### Công cụ MCP
 
-- `figma_bridge_list_exports` — danh sách file `.json` (mới nhất trước).
-- `figma_bridge_read_export` — đọc nguyên một file (tham số `name` = basename an toàn, kết thúc `.json`).
-- `figma_bridge_export_schema_hint` — mô tả nhanh các phase + gợi ý schema.
-- `figma_bridge_export_outline` — **cây mục lục nhẹ** (meta + id/name/type/bbox/childCount, cắt theo `maxDepth`), không kèm fills/effects/text/variables/rasters. Dùng **đầu tiên** để điều hướng file lớn.
-- `figma_bridge_read_node` — đọc **một subtree** theo `nodeId` (tùy chọn `depth`); chi phí context tỉ lệ với node, không phải cả file.
-- `figma_bridge_search_nodes` — tìm node theo `query` khớp tên/loại → danh sách `{id,name,type,bbox}` để đưa vào `read_node`.
-- `figma_bridge_get_raster` — lấy **một** raster base64 theo `key` (node id hoặc image hash) từ `rasters`, để byte ảnh nặng không lọt vào lần đọc node.
+| Tool | Công dụng |
+|------|-----------|
+| `figma_bridge_list_exports` | Danh sách file `.json` (mới nhất trước) |
+| `figma_bridge_export_outline` | **Cây mục lục nhẹ** (meta + id/name/type/bbox/childCount, cắt theo `maxDepth`) — dùng **đầu tiên** để điều hướng file lớn |
+| `figma_bridge_search_nodes` | Tìm node theo tên/loại → `{id,name,type,bbox}` |
+| `figma_bridge_read_node` | Đọc **một subtree** theo `nodeId` (tùy chọn `depth`) — chi phí context tỉ lệ với node, không phải cả file |
+| `figma_bridge_get_raster` | Lấy **một** raster base64 theo `key` (node id hoặc image hash) |
+| `figma_bridge_read_export` | Đọc **nguyên** một file (fallback cho file nhỏ) |
+| `figma_bridge_export_schema_hint` | Mô tả nhanh các phase + gợi ý schema |
+
+## Dùng JSON với Claude / Cursor
+
+Gợi ý prompt cho AGENT để dựng UI hiệu quả mà không nổ context:
+
+1. `figma_bridge_list_exports` → lấy tên file mới nhất.
+2. `figma_bridge_export_outline` → nắm cấu trúc màn hình.
+3. `figma_bridge_search_nodes` / `figma_bridge_read_node` → đọc từng frame cần dựng.
+4. Khi sinh code:
+   - Dùng thẳng **`cssColor`** (đã `#hex`/`rgba`), không tự tính từ `{r,g,b}`.
+   - Dùng **`layout.css`** (block flexbox đã map sẵn) cho frame auto-layout; dùng **`layoutSelf`** cho FILL/HUG/FIXED/grow của từng con.
+   - Dùng **`rel`** cho vị trí absolute; **`text.segments`** cho rich text; **`geometry.fillGeometry`** để render icon bằng `<path d>`.
+   - Màu/spacing là token? Đọc `tokens` ngay tại paint hoặc bảng `variables` (đã resolve) để đặt tên biến/Tailwind theme thay vì hard-code.
 
 > Luồng khuyến nghị cho file lớn: `export_outline` → `search_nodes` → `read_node` (thay vì `read_export` đọc cả file).
 
 ## Schema JSON
 
-Xem `schema/export-v3.schema.json` — `roots[]` theo `$defs/node`. Mỗi node (plugin v0.3+) gồm:
+Xem `schema/export-v3.schema.json` — `roots[]` theo `$defs/node`. Mỗi node (plugin v0.4+) gồm:
 
 - `bbox` có `space: "absolute" | "relative"` (đừng trộn 2 hệ toạ độ); thêm `rel` — hộp **tương đối với parent** (left/top/width/height sẵn cho CSS absolute).
-- `layout` — auto-layout của container (gồm `layoutGrids` và `css` — block flexbox sẵn dùng: display/flexDirection/justifyContent/alignItems/gap/padding).
+- `layout` — auto-layout của container (gồm `layoutGrids` và `css` — block flexbox sẵn dùng).
 - `layoutSelf` — sizing/độ co giãn theo từng node: `constraints`, `layoutSizingHorizontal/Vertical` (FIXED/HUG/FILL), `layoutGrow`, `layoutAlign`, `min/maxWidth/Height`.
-- `fills`/`strokes` — màu có sẵn **`cssColor`** (#hex/rgba, đã gộp opacity); gradient lưu **đầy đủ stops (kèm cssColor) + `gradientTransform`**; stroke có `dashPattern`/`strokeCap`/`strokeJoin`.
-- `geometry` — vector path (`fillGeometry`/`strokeGeometry` dạng SVG path) cho VECTOR/BOOLEAN_OPERATION/LINE/POLYGON/STAR → dựng lại icon bằng `<path d>`.
-- `text.segments` (phase ≥ 2) — style theo từng đoạn (đậm/màu/cỡ riêng) thay vì gộp thành `"mixed"`; thêm `fontWeight`.
+- `fills`/`strokes` — màu có sẵn **`cssColor`**; gradient lưu **đầy đủ stops (kèm cssColor) + `gradientTransform`**; stroke có `dashPattern`/`strokeCap`/`strokeJoin`.
+- `geometry` — vector path (`fillGeometry`/`strokeGeometry` dạng SVG path) cho VECTOR/BOOLEAN_OPERATION/LINE/POLYGON/STAR.
+- `text.segments` (phase ≥ 2) — style theo từng đoạn (đậm/màu/cỡ riêng) thay vì gộp `"mixed"`; thêm `fontWeight`.
 - `isMask`/`maskType`.
 
-Phase ≥ 2: `variables` là **bảng token gọn** (chỉ token được tham chiếu, đã resolve `value` + `cssColor` theo mode mặc định); paint nào bind variable có thêm `tokens` ngay tại paint. Phase 3 vẫn thêm component/variant + raster.
+Phase ≥ 2: `variables` là **bảng token gọn** (chỉ token được tham chiếu, đã resolve `value` + `cssColor` theo mode mặc định); paint nào bind variable có thêm `tokens` ngay tại paint. Phase 3 thêm component/variant + raster (`rasters` map: node id hoặc image hash → base64; lấy qua `figma_bridge_get_raster`).
 
-## Lưu ý
+## Cấu trúc dự án
 
-- Đây là **dữ liệu cục bộ**: không thay thế Figma REST API hay quota gói Figma; chỉ giảm phụ thuộc vào **MCP cloud** khi làm việc với snapshot đã export.
+```
+plugin/
+  manifest.json     # khai báo plugin (documentAccess: dynamic-page, devAllowedDomains)
+  main.ts           # UI plugin + gửi POST (kèm X-Bridge-Token) lên bridge
+  serialize.ts      # serialize scene graph Figma -> JSON (trái tim của tool)
+src/
+  bridge/server.ts  # HTTP bridge: nhận POST, ghi exports/ (token-gated)
+  mcp/server.ts      # MCP stdio: list/outline/read_node/search/get_raster/...
+  shared/            # tiện ích dùng chung (exportPaths, safeExportName, exportNodes)
+schema/
+  export-v3.schema.json
+exports/            # nơi JSON xuất ra (gitignored, trừ .gitkeep)
+```
+
+## Phát triển
+
+| Lệnh | Việc |
+|------|------|
+| `pnpm build:plugin` | Bundle plugin → `plugin/dist/code.js` |
+| `pnpm build:mcp` | Bundle MCP → `dist-mcp/server.js` |
+| `pnpm bridge` | Chạy HTTP bridge (tsx) |
+| `pnpm mcp` | Chạy MCP qua tsx (dev) |
+| `pnpm typecheck` | `tsc --noEmit` cho `src/**` |
+
+`tsconfig.json` chỉ check `src/**`; plugin được transpile bằng esbuild (không type-check khi build). Có 3 cảnh báo `=== figma.mixed` (TS2367) tồn tại sẵn trong `plugin/serialize.ts` — vô hại lúc runtime (đúng cách dùng Figma, chỉ là hạn chế typings).
+
+**Quy trình nhánh:** tạo feature branch từ `develop` → PR base `develop` → merge. Phát hành: PR `develop` → `main`.
+
+## Lưu ý / giới hạn
+
 - File page lớn có thể rất nặng; plugin giới hạn `maxNodes` / `maxDepth` và có thể đánh dấu `omitted`.
-- PNG base64 chỉ bật khi **phase 3** + checkbox raster; khuyến nghị chỉ dùng trên vài frame nhỏ.
+- PNG/raster + byte ảnh chỉ bật khi **phase 3** + checkbox raster (cap: ≤5 layer gốc PNG, ≤12 ảnh, ≤512KB/ảnh); khuyến nghị dùng có chọn lọc.
+- `imageHash` trên IMAGE fill là **không phải URL**; muốn byte ảnh thật thì bật raster (phase 3) rồi lấy qua `figma_bridge_get_raster`.
