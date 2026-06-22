@@ -11,6 +11,7 @@ type UiMessage = {
   phase: ExportPhase;
   scope: ExportScope;
   bridgeUrl: string;
+  token: string;
   includeRaster: boolean;
 };
 
@@ -19,6 +20,9 @@ figma.ui.onmessage = async (msg: UiMessage) => {
     return;
   }
   const base = msg.bridgeUrl.replace(/\/$/, "");
+  // Remember the bridge URL + token so the user only pastes the token once.
+  await figma.clientStorage.setAsync("bridgeUrl", msg.bridgeUrl);
+  await figma.clientStorage.setAsync("bridgeToken", msg.token ?? "");
   try {
     const payload = await buildExportPayload({
       phase: msg.phase,
@@ -27,7 +31,10 @@ figma.ui.onmessage = async (msg: UiMessage) => {
     });
     const res = await fetch(`${base}/export`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bridge-Token": msg.token ?? "",
+      },
       body: JSON.stringify(payload),
     });
     const text = await res.text();
@@ -45,6 +52,10 @@ figma.ui.onmessage = async (msg: UiMessage) => {
     });
     if (res.ok) {
       figma.notify("Đã gửi export lên bridge.");
+    } else if (res.status === 401) {
+      figma.notify("Bridge từ chối: token sai/thiếu — kiểm tra ô Bridge token.", {
+        error: true,
+      });
     } else {
       figma.notify("Bridge trả lỗi — xem log trong plugin.", { error: true });
     }
@@ -75,6 +86,9 @@ const html = `
 <label>Bridge URL</label>
 <input id="url" value="http://localhost:3845" />
 <div class="hint">Chạy: pnpm bridge trong thư mục mcp-bridge-figma</div>
+<label>Bridge token</label>
+<input id="token" placeholder="dán token in ở terminal" />
+<div class="hint">Lấy từ dòng "[figma-bridge] token: …" khi chạy pnpm bridge (lưu lại tự động)</div>
 <label>Phase</label>
 <select id="phase">
   <option value="1">1 — Cây layout &amp; hình học</option>
@@ -104,6 +118,7 @@ const html = `
         phase: parseInt(document.getElementById("phase").value, 10),
         scope: document.getElementById("scope").value,
         bridgeUrl: document.getElementById("url").value.trim(),
+        token: document.getElementById("token").value.trim(),
         includeRaster: document.getElementById("raster").checked,
       }
     }, "*");
@@ -111,11 +126,32 @@ const html = `
   run.onclick = post;
   window.onmessage = (event) => {
     const m = event.data.pluginMessage;
-    if (!m || m.type !== "done") return;
+    if (!m) return;
+    if (m.type === "init") {
+      if (m.bridgeUrl) document.getElementById("url").value = m.bridgeUrl;
+      document.getElementById("token").value = m.token || "";
+      return;
+    }
+    if (m.type !== "done") return;
     run.disabled = false;
     log.textContent = JSON.stringify(m.body, null, 2);
   };
 </script>
 `;
 
-figma.showUI(html, { width: 340, height: 260, themeColors: true });
+figma.showUI(html, { width: 340, height: 320, themeColors: true });
+
+// Prefill the bridge URL + token from the last run (stored via clientStorage).
+void (async () => {
+  const url = (await figma.clientStorage.getAsync("bridgeUrl")) as
+    | string
+    | undefined;
+  const token = (await figma.clientStorage.getAsync("bridgeToken")) as
+    | string
+    | undefined;
+  figma.ui.postMessage({
+    type: "init",
+    bridgeUrl: typeof url === "string" && url ? url : "http://localhost:3845",
+    token: typeof token === "string" ? token : "",
+  });
+})();
