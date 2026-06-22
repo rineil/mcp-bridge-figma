@@ -24,7 +24,15 @@ pnpm build:mcp
 pnpm bridge
 ```
 
-Mặc định: `http://localhost:3845` — `GET /health`, `POST /export`.
+Mặc định: `http://localhost:3845` — `GET /health` (mở), `POST /export` (**cần token**).
+
+Khi chạy, bridge in ra dòng:
+
+```
+[figma-bridge] token: <chuỗi hex>
+```
+
+**Dán token này vào ô "Bridge token" trong plugin** (plugin lưu lại qua `clientStorage`, chỉ phải dán 1 lần). `POST /export` không kèm header `X-Bridge-Token` đúng → `401`. Mục đích: một trang web bất kỳ (hoặc tiến trình local khác) không thể ghi JSON tùy ý vào `exports/` để đầu độc dữ liệu mà agent đọc.
 
 Biến môi trường:
 
@@ -33,6 +41,10 @@ Biến môi trường:
 | `BRIDGE_PORT` | `3845` | Cổng HTTP |
 | `BRIDGE_HOST` | `localhost` | Host bind |
 | `FIGMA_EXPORT_DIR` | `./exports` (theo cwd) | Thư mục ghi JSON |
+| `BRIDGE_TOKEN` | *(tự sinh)* | Token cố định cho `POST /export`. Nếu không đặt, bridge sinh ngẫu nhiên và lưu ở `<exportDir>/.bridge-token` (ổn định qua các lần restart). |
+| `BRIDGE_MAX_BYTES` | `67108864` (64MB) | Giới hạn kích thước body `POST` (chống nuốt bộ nhớ); vượt → `413`. |
+
+> **Cổng 3845 trùng cổng mặc định của Figma Dev Mode MCP Server.** Nếu bạn chạy cả hai, đặt `BRIDGE_PORT` (và sửa `devAllowedDomains` trong manifest cho khớp).
 
 **Localhost / import manifest:** Figma không cho để `http://localhost:…` trong `allowedDomains` mà không có `reasoning`, và khuyên dùng `devAllowedDomains` cho server dev. Manifest dùng `allowedDomains: ["none"]` + `devAllowedDomains` (cổng 3845) để import được và `fetch` tới bridge **khi chạy plugin dạng development** (import từ manifest). Nếu đổi cổng, sửa cả hai URL trong `devAllowedDomains` cho khớp.
 
@@ -40,7 +52,7 @@ Biến môi trường:
 
 1. Figma → **Plugins** → **Development** → **Import plugin from manifest…**
 2. Chọn `mcp-bridge-figma/plugin/manifest.json` (sau khi đã `pnpm build:plugin` để có `plugin/dist/code.js`).
-3. Mở file thiết kế, chạy plugin **Reform MCP Bridge**, chọn phase / scope, bấm **Export → bridge** (bridge phải đang chạy).
+3. Mở file thiết kế, chạy plugin **Reform MCP Bridge**, **dán Bridge token** (in ở terminal lúc `pnpm bridge`), chọn phase / scope, bấm **Export → bridge** (bridge phải đang chạy).
 
 File JSON xuất hiện trong `mcp-bridge-figma/exports/`.
 
