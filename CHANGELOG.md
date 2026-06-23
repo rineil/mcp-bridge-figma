@@ -9,6 +9,29 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Chưa có thay đổi chưa phát hành._
 
+## [0.6.0] - 2026-06-23
+
+Nhóm tính năng nâng cao cho việc dựng UI. Phiên bản: plugin `0.6.0`, MCP server `0.7.0`.
+
+### Added
+
+- **Multi-mode token**: biến có collection >1 mode (vd light/dark) thêm mảng
+  `byMode` `[{mode,value,cssColor}]` resolve mọi mode (alias theo từng mode) →
+  sinh `:root`/`.dark` ([#16](https://github.com/rineil/mcp-bridge-figma/pull/16)).
+- **`figma_bridge_codegen`** — sinh khung **JSX (React inline-style)** cho 1 node,
+  gộp `css`/`layout.css` (text→`<span>`, vector→`<svg>`, ảnh→`<img data-raster>`)
+  ([#17](https://github.com/rineil/mcp-bridge-figma/pull/17)).
+- **`figma_bridge_list_components`** — gom INSTANCE (phase 3) theo main component
+  → inventory `[{id,name,count,instanceIds}]` để nhận diện component lặp và dựng
+  library ([#19](https://github.com/rineil/mcp-bridge-figma/pull/19)).
+
+### Changed
+
+- **Server MCP tự nhúng bridge** (1 launchable; tắt bằng `BRIDGE_EMBED=0`) —
+  không cần chạy `pnpm bridge` riêng. Logic tách ra `src/shared/bridgeCore.ts`;
+  bridge nhúng log ra **stderr** (stdout là JSON-RPC); xử lý `EADDRINUSE`
+  ([#18](https://github.com/rineil/mcp-bridge-figma/pull/18)).
+
 ## [0.5.0] - 2026-06-23
 
 Tập trung vào chất lượng "design → code" và hạ tầng dev. Phiên bản: plugin
@@ -85,6 +108,7 @@ kế Figma ra JSON cục bộ.
   server-side + `writeFile` cờ `wx` (không ghi đè), `/health` không lộ `exportDir`
   ([#5](https://github.com/rineil/mcp-bridge-figma/pull/5)).
 
-[Unreleased]: https://github.com/rineil/mcp-bridge-figma/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/rineil/mcp-bridge-figma/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/rineil/mcp-bridge-figma/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rineil/mcp-bridge-figma/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rineil/mcp-bridge-figma/releases/tag/v0.4.0

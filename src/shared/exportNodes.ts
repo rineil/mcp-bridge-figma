@@ -111,3 +111,55 @@ export function searchNodes(
   }
   return out;
 }
+
+export type ComponentEntry = {
+  id: string;
+  name: unknown;
+  key: unknown;
+  remote: unknown;
+  count: number;
+  instanceIds: string[];
+};
+
+/**
+ * Group INSTANCE nodes by their main component (phase 3 data), so an agent can
+ * recognize repeated components (e.g. "Button x14") and build a reusable library
+ * instead of flat duplicated markup. Sorted by usage count, descending.
+ */
+export function componentInventory(
+  roots: ExportNode[],
+  maxIds = 50,
+): ComponentEntry[] {
+  const byId = new Map<string, ComponentEntry>();
+  const walk = (node: ExportNode): void => {
+    if (node.type === "INSTANCE") {
+      const comp = node.component as Record<string, unknown> | undefined;
+      const main = comp?.mainComponent as Record<string, unknown> | undefined;
+      if (main && typeof main.id === "string") {
+        let e = byId.get(main.id);
+        if (!e) {
+          e = {
+            id: main.id,
+            name: main.name,
+            key: main.key,
+            remote: main.remote,
+            count: 0,
+            instanceIds: [],
+          };
+          byId.set(main.id, e);
+        }
+        e.count += 1;
+        if (e.instanceIds.length < maxIds && typeof node.id === "string") {
+          e.instanceIds.push(node.id);
+        }
+      }
+    }
+    for (const k of nodeChildren(node)) {
+      walk(k);
+    }
+  };
+  for (const r of roots) {
+    walk(r);
+  }
+  return [...byId.values()].sort((a, b) => b.count - a.count);
+}

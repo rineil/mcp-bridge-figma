@@ -78,4 +78,51 @@ describe("resolveTokens", () => {
     };
     expect(out.variables).toHaveLength(0);
   });
+
+  it("resolves all modes (light/dark) into byMode, following aliases per mode", () => {
+    const multi = {
+      collections: [
+        {
+          id: "C1",
+          name: "Theme",
+          defaultModeId: "light",
+          modes: [
+            { modeId: "light", name: "Light" },
+            { modeId: "dark", name: "Dark" },
+          ],
+        },
+      ],
+      variables: [
+        {
+          id: "BASE",
+          name: "color/bg",
+          resolvedType: "COLOR",
+          variableCollectionId: "C1",
+          valuesByMode: {
+            light: { r: 1, g: 1, b: 1, a: 1 },
+            dark: { r: 0, g: 0, b: 0, a: 1 },
+          },
+        },
+        {
+          id: "ALIAS",
+          name: "color/surface",
+          resolvedType: "COLOR",
+          variableCollectionId: "C1",
+          valuesByMode: {
+            light: { type: "VARIABLE_ALIAS", id: "BASE" },
+            dark: { type: "VARIABLE_ALIAS", id: "BASE" },
+          },
+        },
+      ],
+    };
+    const roots = [
+      { id: "n1", fills: [{ type: "SOLID", boundVariables: { color: "ALIAS" } }] },
+    ];
+    const out = resolveTokens(roots, multi) as { variables: any[] };
+    const alias = out.variables.find((v) => v.id === "ALIAS");
+    expect(alias.byMode).toEqual([
+      { mode: "Light", value: { r: 1, g: 1, b: 1, a: 1 }, cssColor: "#ffffff" },
+      { mode: "Dark", value: { r: 0, g: 0, b: 0, a: 1 }, cssColor: "#000000" },
+    ]);
+  });
 });

@@ -10,17 +10,23 @@ import { resolveExportDir } from "../shared/exportPaths.js";
 import { assertSafeExportBasename } from "../shared/safeExportName.js";
 import {
   asRoots,
+  componentInventory,
   findNodeById,
   limitDepth,
   outline,
   searchNodes,
 } from "../shared/exportNodes.js";
 import { sniffImageMime } from "../shared/raster.js";
+import { codegenNode } from "../shared/codegen.js";
+import {
+  createBridgeServer,
+  loadOrCreateToken,
+} from "../shared/bridgeCore.js";
 
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.4.0" },
+  { name: "mcp-bridge-figma", version: "0.7.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -154,8 +160,8 @@ server.registerTool(
         text: JSON.stringify(
           {
             phase1: "Per-node scene graph: bbox (space=absolute|relative) + `rel` (parent-relative box), fills/strokes (`cssColor` #hex/rgba, gradients incl. ready `cssGradient`), and a consolidated per-node `css` block (background/border/borderRadius/boxShadow/filter/opacity + absolute position when not an auto-layout child). Containers also have `layout`+`layout.css` (flexbox); children have `layoutSelf` (FILL/HUG/FIXED). Vector `geometry.fillGeometry` (SVG paths), isMask, corner radii, stroke dash/cap/join.",
-            phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight + CSS-ready cssLineHeight/cssLetterSpacing/cssTextTransform/cssTextDecoration; effect detail; style IDs.",
-            phase3: "Adds component/variant/instance metadata, mainComponent refs, optional PNG raster (base64) for small nodes when enabled in plugin.",
+            phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor, plus `byMode` [{mode,value,cssColor}] for multi-mode collections e.g. light/dark) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight + CSS-ready cssLineHeight/cssLetterSpacing/cssTextTransform/cssTextDecoration; effect detail; style IDs.",
+            phase3: "Adds component/variant/instance metadata, mainComponent refs (group repeated instances with figma_bridge_list_components), optional PNG raster (base64) for small nodes when enabled in plugin.",
             notes: "Pass name:\"latest\" to any read tool to target the newest export. Each node has a ready `css` block + cssColor/cssGradient — apply them directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, figma_bridge_get_raster returns an MCP image block (the agent can SEE it) keyed by node id or imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
@@ -308,5 +314,95 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "figma_bridge_codegen",
+  {
+    description:
+      'Generate a React inline-style JSX skeleton for ONE node (by id) from an export, composing the serializer\'s css/layout.css. TEXT -> <span> with color/font, vector -> inline <svg>, IMAGE fill -> <img data-raster=…> (fetch bytes via figma_bridge_get_raster). A deterministic scaffold to iterate on, not final code. Accepts name:"latest".',
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(5)
+        .describe('Export basename ending in .json, or "latest"'),
+      nodeId: z.string().min(1).describe('Node id, e.g. "12:345"'),
+      depth: z.number().int().min(0).max(50).optional().default(8),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(20_000_000)
+        .optional()
+        .default(8_000_000),
+    }),
+  },
+  async ({ name, nodeId, depth, maxBytes }) => {
+    const res = await loadExport(name, maxBytes);
+    if (!res.ok) {
+      return { ...jsonText(res.error), isError: true };
+    }
+    const node = findNodeById(asRoots(res.data.roots), nodeId);
+    if (!node) {
+      return { ...jsonText({ error: "node_not_found", nodeId }), isError: true };
+    }
+    return { content: [{ type: "text" as const, text: codegenNode(node, depth) }] };
+  },
+);
+
+server.registerTool(
+  "figma_bridge_list_components",
+  {
+    description:
+      'Inventory of components used in an export: groups INSTANCE nodes by their main component → [{id,name,key,remote,count,instanceIds}] sorted by usage. Use to recognize repeated components ("Button x14") and build a reusable library instead of duplicated markup. Requires phase 3. Accepts name:"latest".',
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(5)
+        .describe('Export basename ending in .json, or "latest"'),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(50_000_000)
+        .optional()
+        .default(20_000_000),
+    }),
+  },
+  async ({ name, maxBytes }) => {
+    const res = await loadExport(name, maxBytes);
+    if (!res.ok) {
+      return { ...jsonText(res.error), isError: true };
+    }
+    const components = componentInventory(asRoots(res.data.roots));
+    return jsonText({ count: components.length, components });
+  },
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// Embed the local ingest HTTP server so `node dist-mcp/server.js` is the ONLY
+// launchable (no separate `pnpm bridge`). Opt out with BRIDGE_EMBED=0.
+// CRITICAL: all logging goes to STDERR — stdout is the MCP JSON-RPC stream.
+if (process.env.BRIDGE_EMBED !== "0") {
+  const elog = (m: string): void => {
+    process.stderr.write(`[figma-bridge] ${m}\n`);
+  };
+  const port = Number(process.env.BRIDGE_PORT ?? "3845");
+  const host = process.env.BRIDGE_HOST ?? "localhost";
+  const maxBytes = Number(
+    process.env.BRIDGE_MAX_BYTES ?? String(64 * 1024 * 1024),
+  );
+  const token = loadOrCreateToken(exportDir);
+  const bridge = createBridgeServer({ exportDir, token, maxBytes });
+  bridge.on("error", (e: NodeJS.ErrnoException) => {
+    if (e.code === "EADDRINUSE") {
+      elog(`port ${port} already in use — a separate bridge is likely running; not embedding.`);
+    } else {
+      elog(`embedded ingest error: ${e.message}`);
+    }
+  });
+  bridge.listen(port, host, () => {
+    elog(`embedded ingest on http://${host}:${port}  exportDir=${exportDir}`);
+    elog(`token: ${token} — paste into the plugin's "Bridge token" field.`);
+  });
+}
