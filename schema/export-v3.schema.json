@@ -18,6 +18,7 @@
         "pageId": { "type": "string" },
         "pageName": { "type": "string" },
         "nodeCount": { "type": "integer" },
+        "omittedCount": { "type": "integer", "description": "Nodes dropped as `omitted` for hitting maxNodes/maxDepth (0 = nothing truncated)." },
         "maxDepth": { "type": "integer" },
         "maxNodes": { "type": "integer" }
       }
@@ -84,14 +85,15 @@
         },
         "isMask": { "type": "boolean" },
         "maskType": { "type": "string" },
-        "fills": { "type": "array", "description": "Paints. SOLID has color {r,g,b} 0..1 + `cssColor` (#hex/rgba, opacity folded in). GRADIENT_* has gradientStops[{position,color,cssColor}] + gradientTransform. IMAGE has imageHash (opaque, not a URL) + scaleMode. A paint that binds a variable also has `tokens` (field -> {id,name,collection,value,cssColor})." },
+        "fills": { "type": "array", "description": "Paints. SOLID has color {r,g,b} 0..1 + `cssColor` (#hex/rgba, opacity folded in). GRADIENT_* has gradientStops[{position,color,cssColor}] + gradientTransform + `cssGradient` (a ready linear/radial/conic-gradient string; radial/angular/diamond are approximate). IMAGE has imageHash (opaque, not a URL) + scaleMode. A paint that binds a variable also has `tokens` (field -> {id,name,collection,value,cssColor})." },
+        "css": { "type": "object", "description": "Ready-to-apply CSS for THIS node, composed from the derived pieces: background (cssColor or cssGradient), border (stroke), borderRadius, boxShadow, filter/backdropFilter, opacity, and — when the node is not an auto-layout child — position/left/top/width/height from `rel`. Auto-layout containers also expose `layout.css` (flexbox)." },
         "strokes": { "type": "array" },
         "strokeWeight": { "type": "number" },
         "strokeAlign": { "type": "string" },
         "dashPattern": { "type": "array", "items": { "type": "number" } },
         "strokeCap": { "type": "string" },
         "strokeJoin": { "type": "string" },
-        "effects": { "type": "array", "description": "Shadows/blurs. At phase >= 2, shadows add color/cssColor/offset/radius/spread." },
+        "effects": { "type": "array", "description": "Shadows/blurs. At phase >= 2, shadows add color/cssColor/offset/radius/spread; the composed `box-shadow`/`filter` live in the node's `css` block." },
         "layout": {
           "type": "object",
           "description": "Container auto-layout (FRAME/COMPONENT/INSTANCE): layoutMode, sizing modes, align, padding, itemSpacing, layoutWrap, layoutGrids, and `css` — a ready flexbox block (display/flexDirection/justifyContent/alignItems/gap/padding/flexWrap)."
@@ -113,7 +115,7 @@
         },
         "text": {
           "type": "object",
-          "description": "TEXT nodes. Node-level fields plus, at phase >= 2, `segments` (per-range styling from getStyledTextSegments so bold/colored/sized runs survive) and `fontWeight`."
+          "description": "TEXT nodes. Node-level fields plus, at phase >= 2: `segments` (per-range styling from getStyledTextSegments so bold/colored/sized runs survive), `fontWeight`, and CSS-ready `cssLineHeight`/`cssLetterSpacing`/`cssTextTransform`/`cssTextDecoration` (also per segment)."
         },
         "geometry": {
           "type": "object",

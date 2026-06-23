@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { resolveExportDir } from "../shared/exportPaths.js";
+import { exportPrefix } from "../shared/exportNaming.js";
 
 const PORT = Number(process.env.BRIDGE_PORT ?? "3845");
 const HOST = process.env.BRIDGE_HOST ?? "localhost";
@@ -105,33 +106,16 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function slugFileKey(key: string): string {
-  return key.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 64) || "file";
-}
-
-/** Figma often omits `fileKey` (draft / local / some contexts); use document name as filename prefix. */
-function exportFilenamePrefix(meta: {
-  fileKey?: string | null;
-  fileName?: string;
-}): string {
-  const fk = meta.fileKey;
-  if (fk != null && String(fk).trim() !== "") {
-    return slugFileKey(String(fk));
-  }
-  const name = meta.fileName;
-  if (name != null && String(name).trim() !== "") {
-    return slugFileKey(String(name));
-  }
-  return "export";
-}
-
 async function handleExport(
   body: string,
 ): Promise<{ path: string; bytes: number }> {
   const data = JSON.parse(body) as {
     meta?: { fileKey?: string | null; fileName?: string };
+    roots?: Array<{ name?: unknown }>;
   };
-  const prefix = exportFilenamePrefix(data.meta ?? {});
+  const firstRootName =
+    typeof data.roots?.[0]?.name === "string" ? data.roots[0].name : undefined;
+  const prefix = exportPrefix(data.meta ?? {}, firstRootName);
   // Server-side timestamp — do NOT trust client meta.exportedAt for the filename.
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   await mkdir(exportDir, { recursive: true });
@@ -143,6 +127,9 @@ async function handleExport(
     const full = join(exportDir, name);
     try {
       await writeFile(full, body, { encoding: "utf8", flag: "wx" });
+      // Pointer to the newest export so MCP tools can resolve name:"latest".
+      // Not a .json file, so it never appears in list_exports.
+      await writeFile(join(exportDir, "_latest.txt"), name, "utf8");
       return { path: full, bytes };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EEXIST") {

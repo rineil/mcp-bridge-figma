@@ -1,15 +1,27 @@
 /// <reference types="@figma/plugin-typings" />
 
+import {
+  buildNodeCss,
+  collectImageHashes,
+  cssColor,
+  cssGradient,
+  cssLetterSpacing,
+  cssLineHeight,
+  cssTextDecoration,
+  cssTextTransform,
+  resolveTokens,
+} from "./pure";
+
 export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.5.1";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
 
-type Counter = { n: number };
+type Counter = { n: number; omitted: number };
 
 function uint8ToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -21,24 +33,13 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function clampChannel(n: number): number {
-  return Math.max(0, Math.min(255, Math.round(n * 255)));
-}
-
-function hex2(n: number): string {
-  return clampChannel(n).toString(16).padStart(2, "0");
-}
-
-/** Figma color {r,g,b} 0..1 (+ optional a / layer opacity) -> CSS hex or rgba(). */
-function cssColor(
-  c: { r: number; g: number; b: number; a?: number },
-  opacity = 1,
-): string {
-  const a = (typeof c.a === "number" ? c.a : 1) * opacity;
-  if (a >= 0.999) {
-    return `#${hex2(c.r)}${hex2(c.g)}${hex2(c.b)}`;
-  }
-  return `rgba(${clampChannel(c.r)}, ${clampChannel(c.g)}, ${clampChannel(c.b)}, ${Math.round(a * 1000) / 1000})`;
+/**
+ * Runtime guard for figma.mixed. Typed as `unknown` so comparisons don't trip
+ * TS2367 on properties the typings model as never-mixed (fills/strokes/effects/
+ * strokeStyleId) even though they can be figma.mixed at runtime.
+ */
+function isMixed(v: unknown): boolean {
+  return v === figma.mixed;
 }
 
 function bbox(node: SceneNode): {
@@ -85,9 +86,18 @@ function serializeBoundVars(bv: {
   return o;
 }
 
+function nodeDims(node: object): { width: number; height: number } {
+  const n = node as Record<string, unknown>;
+  return {
+    width: typeof n.width === "number" ? n.width : 1,
+    height: typeof n.height === "number" ? n.height : 1,
+  };
+}
+
 function serializePaint(
   paint: Paint,
   phase: ExportPhase,
+  dims?: { width: number; height: number },
 ): Record<string, unknown> {
   const o: Record<string, unknown> = {
     type: paint.type,
@@ -117,6 +127,10 @@ function serializePaint(
         cssColor: cssColor(s.color),
       })) ?? [];
     o.gradientTransform = paint.gradientTransform;
+    const grad = cssGradient(o, dims?.width, dims?.height);
+    if (grad) {
+      o.cssGradient = grad;
+    }
     if (phase >= 2 && "boundVariables" in paint && paint.boundVariables) {
       o.boundVariables = JSON.parse(
         JSON.stringify(paint.boundVariables),
@@ -133,22 +147,24 @@ function serializeFills(
   node: GeometryMixin & BlendMixin,
   phase: ExportPhase,
 ): unknown[] {
-  if (!("fills" in node) || node.fills === figma.mixed) {
+  if (!("fills" in node) || isMixed(node.fills)) {
     return [];
   }
   const fills = node.fills as readonly Paint[];
-  return fills.map((p) => serializePaint(p, phase));
+  const dims = nodeDims(node);
+  return fills.map((p) => serializePaint(p, phase, dims));
 }
 
 function serializeStrokes(
   node: GeometryMixin & BlendMixin,
   phase: ExportPhase,
 ): unknown[] {
-  if (!("strokes" in node) || node.strokes === figma.mixed) {
+  if (!("strokes" in node) || isMixed(node.strokes)) {
     return [];
   }
   const strokes = node.strokes as readonly Paint[];
-  return strokes.map((p) => serializePaint(p, phase));
+  const dims = nodeDims(node);
+  return strokes.map((p) => serializePaint(p, phase, dims));
 }
 
 /** Map Figma auto-layout onto a ready-to-use flexbox style block. */
@@ -321,6 +337,10 @@ function styledTextSegments(node: TextNode): unknown[] {
       textDecoration: s.textDecoration,
       lineHeight: s.lineHeight,
       letterSpacing: s.letterSpacing,
+      cssLineHeight: cssLineHeight(s.lineHeight),
+      cssLetterSpacing: cssLetterSpacing(s.letterSpacing),
+      cssTextTransform: cssTextTransform(s.textCase),
+      cssTextDecoration: cssTextDecoration(s.textDecoration),
       fills: s.fills,
       textStyleId: s.textStyleId,
       fillStyleId: s.fillStyleId,
@@ -358,12 +378,29 @@ function textExtras(
       node.textStyleId === figma.mixed ? "mixed" : node.textStyleId;
     o.fontWeight = node.fontWeight === figma.mixed ? "mixed" : node.fontWeight;
     o.segments = styledTextSegments(node);
+    // CSS-ready conversions of the (non-mixed) node-level text props.
+    const clh = cssLineHeight(o.lineHeight);
+    if (clh) {
+      o.cssLineHeight = clh;
+    }
+    const cls = cssLetterSpacing(o.letterSpacing);
+    if (cls) {
+      o.cssLetterSpacing = cls;
+    }
+    const ctt = cssTextTransform(o.textCase);
+    if (ctt) {
+      o.cssTextTransform = ctt;
+    }
+    const ctd = cssTextDecoration(o.textDecoration);
+    if (ctd) {
+      o.cssTextDecoration = ctd;
+    }
   }
   return o;
 }
 
 function serializeEffects(node: BlendMixin, phase: ExportPhase): unknown[] {
-  if (!("effects" in node) || node.effects === figma.mixed) {
+  if (!("effects" in node) || isMixed(node.effects)) {
     return [];
   }
   const effects = node.effects as readonly Effect[];
@@ -421,176 +458,6 @@ async function variableSnapshot(): Promise<{
   }
 }
 
-type RawVar = {
-  id: string;
-  name: string;
-  resolvedType: string;
-  variableCollectionId: string;
-  valuesByMode: Record<string, unknown>;
-};
-type RawCol = { id: string; name: string; defaultModeId: string };
-type VarSnapshot = { collections: unknown[]; variables: unknown[] };
-
-function isAlias(v: unknown): v is { type: "VARIABLE_ALIAS"; id: string } {
-  return (
-    !!v &&
-    typeof v === "object" &&
-    (v as { type?: unknown }).type === "VARIABLE_ALIAS" &&
-    typeof (v as { id?: unknown }).id === "string"
-  );
-}
-
-/** Resolve a variable to its default-mode value, following alias chains. */
-function resolveVar(
-  id: string,
-  varsById: Map<string, RawVar>,
-  colsById: Map<string, RawCol>,
-  depth = 0,
-): { value: unknown; cssColor?: string } | null {
-  if (depth > 8) {
-    return null;
-  }
-  const v = varsById.get(id);
-  if (!v) {
-    return null;
-  }
-  const col = colsById.get(v.variableCollectionId);
-  const modeId =
-    col && col.defaultModeId in v.valuesByMode
-      ? col.defaultModeId
-      : Object.keys(v.valuesByMode)[0];
-  const val = modeId ? v.valuesByMode[modeId] : undefined;
-  if (isAlias(val)) {
-    return resolveVar(val.id, varsById, colsById, depth + 1);
-  }
-  const out: { value: unknown; cssColor?: string } = { value: val };
-  if (
-    v.resolvedType === "COLOR" &&
-    val &&
-    typeof val === "object" &&
-    "r" in (val as Record<string, unknown>)
-  ) {
-    out.cssColor = cssColor(
-      val as { r: number; g: number; b: number; a?: number },
-    );
-  }
-  return out;
-}
-
-/** Collect every variable id nested under a value (alias objects). */
-function collectVarIds(value: unknown, into: Set<string>): void {
-  if (Array.isArray(value)) {
-    for (const v of value) {
-      collectVarIds(v, into);
-    }
-    return;
-  }
-  if (isAlias(value)) {
-    into.add(value.id);
-    return;
-  }
-  if (value && typeof value === "object") {
-    for (const v of Object.values(value as Record<string, unknown>)) {
-      collectVarIds(v, into);
-    }
-  }
-}
-
-/**
- * Attach resolved `tokens` onto paints that bind variables, collect every
- * referenced variable id, and return a COMPACT token table (referenced-only,
- * with default-mode value + cssColor) to replace the full variable dump.
- */
-function resolveTokens(roots: unknown[], snapshot: VarSnapshot): VarSnapshot {
-  const rawVars = snapshot.variables as RawVar[];
-  const rawCols = snapshot.collections as RawCol[];
-  const varsById = new Map(rawVars.map((v) => [v.id, v] as const));
-  const colsById = new Map(rawCols.map((c) => [c.id, c] as const));
-  const referenced = new Set<string>();
-
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      for (const n of node) {
-        walk(n);
-      }
-      return;
-    }
-    if (!node || typeof node !== "object") {
-      return;
-    }
-    const obj = node as Record<string, unknown>;
-    const bv = obj.boundVariables;
-    if (bv && typeof bv === "object") {
-      const tokens: Record<string, unknown> = {};
-      for (const [field, ref] of Object.entries(bv as Record<string, unknown>)) {
-        if (typeof ref === "string") {
-          referenced.add(ref);
-          const v = varsById.get(ref);
-          const r = resolveVar(ref, varsById, colsById);
-          tokens[field] = {
-            id: ref,
-            name: v?.name,
-            collection: v
-              ? colsById.get(v.variableCollectionId)?.name
-              : undefined,
-            value: r?.value,
-            cssColor: r?.cssColor,
-          };
-        } else {
-          collectVarIds(ref, referenced);
-        }
-      }
-      if (Object.keys(tokens).length > 0) {
-        obj.tokens = tokens;
-      }
-    }
-    for (const v of Object.values(obj)) {
-      walk(v);
-    }
-  };
-  for (const r of roots) {
-    walk(r);
-  }
-
-  // Pull in alias targets of referenced variables until the set is stable.
-  for (let pass = 0; pass < 16; pass++) {
-    const before = referenced.size;
-    for (const id of [...referenced]) {
-      const v = varsById.get(id);
-      if (!v) {
-        continue;
-      }
-      for (const val of Object.values(v.valuesByMode)) {
-        collectVarIds(val, referenced);
-      }
-    }
-    if (referenced.size === before) {
-      break;
-    }
-  }
-
-  const variables = rawVars
-    .filter((v) => referenced.has(v.id))
-    .map((v) => {
-      const r = resolveVar(v.id, varsById, colsById);
-      return {
-        id: v.id,
-        name: v.name,
-        resolvedType: v.resolvedType,
-        collection: colsById.get(v.variableCollectionId)?.name,
-        variableCollectionId: v.variableCollectionId,
-        value: r?.value,
-        cssColor: r?.cssColor,
-        valuesByMode: v.valuesByMode,
-      };
-    });
-  const usedCols = new Set(variables.map((v) => v.variableCollectionId));
-  const collections = (snapshot.collections as Array<{ id: string }>).filter(
-    (c) => usedCols.has(c.id),
-  );
-  return { collections, variables };
-}
-
 function styleIds(
   node: SceneNode,
   phase: ExportPhase,
@@ -601,14 +468,14 @@ function styleIds(
   const o: Record<string, unknown> = {};
   if (
     "fillStyleId" in node &&
-    node.fillStyleId !== figma.mixed &&
+    !isMixed(node.fillStyleId) &&
     node.fillStyleId
   ) {
     o.fillStyleId = node.fillStyleId;
   }
   if (
     "strokeStyleId" in node &&
-    node.strokeStyleId !== figma.mixed &&
+    !isMixed(node.strokeStyleId) &&
     node.strokeStyleId
   ) {
     o.strokeStyleId = node.strokeStyleId;
@@ -677,6 +544,7 @@ export async function serializeNode(
 ): Promise<unknown> {
   counter.n += 1;
   if (counter.n > maxNodes) {
+    counter.omitted += 1;
     return {
       id: node.id,
       type: node.type,
@@ -686,6 +554,7 @@ export async function serializeNode(
     };
   }
   if (depth > maxDepth) {
+    counter.omitted += 1;
     return {
       id: node.id,
       type: node.type,
@@ -800,6 +669,18 @@ export async function serializeNode(
     base.geometry = vec;
   }
 
+  // Consolidated, ready-to-apply CSS block. Absolute positioning only when the
+  // node is NOT a child of an auto-layout frame (otherwise flex handles it).
+  const cssParent = node.parent;
+  const parentIsAuto =
+    !!cssParent &&
+    "layoutMode" in cssParent &&
+    (cssParent as BaseFrameMixin).layoutMode !== "NONE";
+  const nodeCss = buildNodeCss(base, { absolute: !parentIsAuto });
+  if (nodeCss) {
+    base.css = nodeCss;
+  }
+
   const kids = getChildren(node);
   if (kids.length > 0) {
     // Sequential await preserves the depth-first maxNodes/maxDepth counting order.
@@ -813,44 +694,6 @@ export async function serializeNode(
   }
 
   return base;
-}
-
-/** Gather unique imageHash values from IMAGE paints in the serialized tree. */
-function collectImageHashes(roots: unknown[]): string[] {
-  const out = new Set<string>();
-  const visit = (n: unknown): void => {
-    if (Array.isArray(n)) {
-      for (const x of n) {
-        visit(x);
-      }
-      return;
-    }
-    if (!n || typeof n !== "object") {
-      return;
-    }
-    const obj = n as Record<string, unknown>;
-    if (Array.isArray(obj.fills)) {
-      for (const f of obj.fills) {
-        if (
-          f &&
-          typeof f === "object" &&
-          (f as Record<string, unknown>).type === "IMAGE"
-        ) {
-          const h = (f as Record<string, unknown>).imageHash;
-          if (typeof h === "string") {
-            out.add(h);
-          }
-        }
-      }
-    }
-    for (const v of Object.values(obj)) {
-      visit(v);
-    }
-  };
-  for (const r of roots) {
-    visit(r);
-  }
-  return [...out];
 }
 
 export async function buildExportPayload(opts: {
@@ -874,7 +717,7 @@ export async function buildExportPayload(opts: {
     );
   }
 
-  const counter: Counter = { n: 0 };
+  const counter: Counter = { n: 0, omitted: 0 };
   const rasters: Record<string, string> = {};
 
   if (opts.phase >= 3 && opts.includeRaster && opts.scope === "selection") {
@@ -947,6 +790,7 @@ export async function buildExportPayload(opts: {
     pageId: figma.currentPage.id,
     pageName: figma.currentPage.name,
     nodeCount: counter.n,
+    omittedCount: counter.omitted,
     maxDepth,
     maxNodes,
   };
