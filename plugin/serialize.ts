@@ -16,12 +16,12 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.5.0";
+const PLUGIN_VERSION = "0.5.1";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
 
-type Counter = { n: number };
+type Counter = { n: number; omitted: number };
 
 function uint8ToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -544,6 +544,7 @@ export async function serializeNode(
 ): Promise<unknown> {
   counter.n += 1;
   if (counter.n > maxNodes) {
+    counter.omitted += 1;
     return {
       id: node.id,
       type: node.type,
@@ -553,6 +554,7 @@ export async function serializeNode(
     };
   }
   if (depth > maxDepth) {
+    counter.omitted += 1;
     return {
       id: node.id,
       type: node.type,
@@ -715,7 +717,7 @@ export async function buildExportPayload(opts: {
     );
   }
 
-  const counter: Counter = { n: 0 };
+  const counter: Counter = { n: 0, omitted: 0 };
   const rasters: Record<string, string> = {};
 
   if (opts.phase >= 3 && opts.includeRaster && opts.scope === "selection") {
@@ -788,6 +790,7 @@ export async function buildExportPayload(opts: {
     pageId: figma.currentPage.id,
     pageName: figma.currentPage.name,
     nodeCount: counter.n,
+    omittedCount: counter.omitted,
     maxDepth,
     maxNodes,
   };

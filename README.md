@@ -84,6 +84,8 @@ Biến môi trường:
 
 File JSON xuất hiện trong `mcp-bridge-figma/exports/`.
 
+Tiện ích trong plugin: **đèn trạng thái + nút "Kiểm tra kết nối"** (ping `/health`, và tự kiểm tra trước mỗi export để **fail-fast** nếu bridge chưa chạy/token sai); sau khi export hiện **tóm tắt** (tên file, số node, KB, phase/scope) và **cảnh báo nếu bị cắt cụt** (`meta.omittedCount > 0` do chạm `maxNodes`/`maxDepth`). URL/token/phase/scope/raster được **nhớ lại** giữa các lần mở.
+
 ### Phase nào lấy gì?
 
 | Phase | Nội dung | Khi nào dùng |
