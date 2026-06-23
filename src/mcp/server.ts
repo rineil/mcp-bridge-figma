@@ -17,11 +17,15 @@ import {
 } from "../shared/exportNodes.js";
 import { sniffImageMime } from "../shared/raster.js";
 import { codegenNode } from "../shared/codegen.js";
+import {
+  createBridgeServer,
+  loadOrCreateToken,
+} from "../shared/bridgeCore.js";
 
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.5.0" },
+  { name: "mcp-bridge-figma", version: "0.6.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -345,3 +349,30 @@ server.registerTool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// Embed the local ingest HTTP server so `node dist-mcp/server.js` is the ONLY
+// launchable (no separate `pnpm bridge`). Opt out with BRIDGE_EMBED=0.
+// CRITICAL: all logging goes to STDERR — stdout is the MCP JSON-RPC stream.
+if (process.env.BRIDGE_EMBED !== "0") {
+  const elog = (m: string): void => {
+    process.stderr.write(`[figma-bridge] ${m}\n`);
+  };
+  const port = Number(process.env.BRIDGE_PORT ?? "3845");
+  const host = process.env.BRIDGE_HOST ?? "localhost";
+  const maxBytes = Number(
+    process.env.BRIDGE_MAX_BYTES ?? String(64 * 1024 * 1024),
+  );
+  const token = loadOrCreateToken(exportDir);
+  const bridge = createBridgeServer({ exportDir, token, maxBytes });
+  bridge.on("error", (e: NodeJS.ErrnoException) => {
+    if (e.code === "EADDRINUSE") {
+      elog(`port ${port} already in use — a separate bridge is likely running; not embedding.`);
+    } else {
+      elog(`embedded ingest error: ${e.message}`);
+    }
+  });
+  bridge.listen(port, host, () => {
+    elog(`embedded ingest on http://${host}:${port}  exportDir=${exportDir}`);
+    elog(`token: ${token} — paste into the plugin's "Bridge token" field.`);
+  });
+}

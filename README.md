@@ -54,6 +54,8 @@ pnpm bridge
 
 Mặc định: `http://localhost:3845` — `GET /health` (mở), `POST /export` (**cần token**).
 
+> **Không bắt buộc chạy riêng:** server MCP (`dist-mcp/server.js`) **tự nhúng** bridge này (mặc định, cùng `BRIDGE_PORT`), nên nếu đã cấu hình MCP thì plugin POST thẳng vào tiến trình MCP — **khỏi cần `pnpm bridge`**. Lấy token từ `<exportDir>/.bridge-token` (hoặc đặt `BRIDGE_TOKEN` trong env của MCP để chủ động). Nếu vẫn muốn chạy `pnpm bridge` riêng, đặt `BRIDGE_EMBED=0` trong env MCP để khỏi tranh cổng. Log của bridge nhúng ra **stderr** (stdout dành cho JSON-RPC của MCP).
+
 Khi chạy, bridge in ra:
 
 ```
@@ -71,6 +73,7 @@ Biến môi trường:
 | `FIGMA_EXPORT_DIR` | `./exports` (theo cwd) | Thư mục ghi JSON |
 | `BRIDGE_TOKEN` | *(tự sinh)* | Token cố định cho `POST /export`. Nếu không đặt, bridge sinh ngẫu nhiên và lưu ở `<exportDir>/.bridge-token` (ổn định qua các lần restart). |
 | `BRIDGE_MAX_BYTES` | `67108864` (64MB) | Giới hạn kích thước body `POST` (chống nuốt bộ nhớ); vượt → `413`. |
+| `BRIDGE_EMBED` | `1` | Server MCP tự nhúng bridge. Đặt `0` (trong env MCP) nếu chạy `pnpm bridge` riêng để khỏi tranh cổng. |
 
 > **Cổng 3845 trùng cổng mặc định của Figma Dev Mode MCP Server.** Nếu bạn chạy cả hai, đặt `BRIDGE_PORT` (và sửa `devAllowedDomains` trong manifest cho khớp).
 
@@ -183,9 +186,9 @@ plugin/
   serialize.ts      # serialize scene graph Figma -> JSON (trái tim của tool)
   pure.ts           # helper thuần, figma-free (cssColor, resolveTokens…) — test được
 src/
-  bridge/server.ts  # HTTP bridge: nhận POST, ghi exports/ (token-gated)
-  mcp/server.ts      # MCP stdio: list/outline/read_node/search/get_raster/...
-  shared/            # tiện ích thuần dùng chung (exportPaths, safeExportName, exportNaming, exportNodes, raster, codegen)
+  bridge/server.ts  # bridge standalone (mỏng) — dùng shared/bridgeCore
+  mcp/server.ts      # MCP stdio: list/outline/read_node/search/get_raster/codegen + nhúng bridge
+  shared/            # tiện ích thuần dùng chung (exportPaths, safeExportName, exportNaming, exportNodes, raster, codegen, bridgeCore)
 scripts/
   print-mcp-config.mjs  # in JSON cấu hình MCP sẵn dán
 schema/
