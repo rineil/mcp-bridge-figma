@@ -36,6 +36,10 @@
       "type": "object",
       "description": "Present when phase 3 + plugin raster option: map key -> base64. Key is a node id (PNG of a small root node) or an image hash (raw IMAGE-fill bytes). Fetch one on demand via the figma_bridge_get_raster MCP tool.",
       "additionalProperties": { "type": "string", "contentEncoding": "base64" }
+    },
+    "components": {
+      "type": "object",
+      "description": "Present at phase 3 (when LOCAL components are referenced): registry of main-component DEFINITIONS keyed by component id, each a serialized node subtree captured ONCE. Read via figma_bridge_read_component; INSTANCE nodes carry component.overrides (which sub-nodes/fields diverge) so the agent reuses one definition + per-instance diffs."
     }
   },
   "additionalProperties": true,
@@ -127,7 +131,7 @@
         },
         "component": {
           "type": "object",
-          "description": "phase 3: INSTANCE variant/component properties + mainComponent ref; COMPONENT/COMPONENT_SET property definitions."
+          "description": "phase 3: INSTANCE variant/component properties, mainComponent ref, and `overrides` ([{id,overriddenFields}] — sub-nodes/fields that diverge from the definition); COMPONENT/COMPONENT_SET property definitions. Definitions live in the top-level `components` registry."
         },
         "children": {
           "type": "array",

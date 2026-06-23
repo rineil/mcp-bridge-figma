@@ -16,7 +16,7 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.6.0";
+const PLUGIN_VERSION = "0.7.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
@@ -501,6 +501,9 @@ async function componentExtras(
     return {
       variantProperties: inst.variantProperties,
       componentProperties: inst.componentProperties,
+      // Which sub-nodes diverge from the main component, and on which fields,
+      // so the agent can apply per-instance overrides to a shared definition.
+      overrides: inst.overrides,
       mainComponent: main
         ? {
             id: main.id,
@@ -696,6 +699,35 @@ export async function serializeNode(
   return base;
 }
 
+/** Unique LOCAL main-component ids referenced by INSTANCE nodes in the serialized tree. */
+function collectMainComponentIds(roots: unknown[]): string[] {
+  const ids = new Set<string>();
+  const visit = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const x of n) {
+        visit(x);
+      }
+      return;
+    }
+    if (!n || typeof n !== "object") {
+      return;
+    }
+    const obj = n as Record<string, unknown>;
+    const comp = obj.component as Record<string, unknown> | undefined;
+    const main = comp?.mainComponent as Record<string, unknown> | undefined;
+    if (main && typeof main.id === "string" && main.remote === false) {
+      ids.add(main.id);
+    }
+    for (const v of Object.values(obj)) {
+      visit(v);
+    }
+  };
+  for (const r of roots) {
+    visit(r);
+  }
+  return [...ids];
+}
+
 export async function buildExportPayload(opts: {
   phase: ExportPhase;
   scope: ExportScope;
@@ -814,6 +846,39 @@ export async function buildExportPayload(opts: {
 
   if (opts.phase >= 3 && Object.keys(rasters).length > 0) {
     payload.rasters = rasters;
+  }
+
+  // Component registry: serialize each unique LOCAL main component ONCE so the
+  // agent reads a canonical definition (via figma_bridge_read_component) and
+  // applies per-instance `component.overrides`, instead of duplicating markup.
+  if (opts.phase >= 3) {
+    const compIds = collectMainComponentIds(roots).slice(0, 40);
+    const components: Record<string, unknown> = {};
+    for (const id of compIds) {
+      try {
+        const node = await figma.getNodeByIdAsync(id);
+        if (
+          node &&
+          (node.type === "COMPONENT" || node.type === "COMPONENT_SET")
+        ) {
+          // Fresh counter so definitions don't eat the main tree's maxNodes budget.
+          const defCounter: Counter = { n: 0, omitted: 0 };
+          components[id] = await serializeNode(
+            node,
+            opts.phase,
+            defCounter,
+            0,
+            maxDepth,
+            maxNodes,
+          );
+        }
+      } catch {
+        /* component definition optional */
+      }
+    }
+    if (Object.keys(components).length > 0) {
+      payload.components = components;
+    }
   }
 
   return payload;
