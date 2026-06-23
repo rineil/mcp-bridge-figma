@@ -26,7 +26,7 @@ import {
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.8.0" },
+  { name: "mcp-bridge-figma", version: "0.9.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -318,13 +318,17 @@ server.registerTool(
   "figma_bridge_codegen",
   {
     description:
-      'Generate a React inline-style JSX skeleton for ONE node (by id) from an export, composing the serializer\'s css/layout.css. TEXT -> <span> with color/font, vector -> inline <svg>, IMAGE fill -> <img data-raster=…> (fetch bytes via figma_bridge_get_raster). A deterministic scaffold to iterate on, not final code. Accepts name:"latest".',
+      'Generate a React JSX skeleton for ONE node (by id) from an export, composing the serializer\'s css/layout.css. `framework`: "react-inline" (style={{…}}) or "react-tailwind" (className utilities + arbitrary values). TEXT -> <span> with color/font, vector -> inline <svg>, IMAGE fill -> <img data-raster=…> (fetch bytes via figma_bridge_get_raster). A deterministic scaffold to iterate on, not final code. Accepts name:"latest".',
     inputSchema: z.object({
       name: z
         .string()
         .min(5)
         .describe('Export basename ending in .json, or "latest"'),
       nodeId: z.string().min(1).describe('Node id, e.g. "12:345"'),
+      framework: z
+        .enum(["react-inline", "react-tailwind"])
+        .optional()
+        .default("react-inline"),
       depth: z.number().int().min(0).max(50).optional().default(8),
       maxBytes: z
         .number()
@@ -335,7 +339,7 @@ server.registerTool(
         .default(8_000_000),
     }),
   },
-  async ({ name, nodeId, depth, maxBytes }) => {
+  async ({ name, nodeId, framework, depth, maxBytes }) => {
     const res = await loadExport(name, maxBytes);
     if (!res.ok) {
       return { ...jsonText(res.error), isError: true };
@@ -344,7 +348,11 @@ server.registerTool(
     if (!node) {
       return { ...jsonText({ error: "node_not_found", nodeId }), isError: true };
     }
-    return { content: [{ type: "text" as const, text: codegenNode(node, depth) }] };
+    return {
+      content: [
+        { type: "text" as const, text: codegenNode(node, depth, 0, framework) },
+      ],
+    };
   },
 );
 
