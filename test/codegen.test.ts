@@ -86,4 +86,50 @@ describe("codegenNode", () => {
       '<div data-name="Root">{/* 1 children omitted (depth) */}</div>',
     );
   });
+
+  it("react-tailwind: container -> className utilities + arbitrary props", () => {
+    expect(
+      codegenNode(
+        {
+          type: "FRAME",
+          name: "Card",
+          layout: {
+            css: {
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: "12px",
+              padding: "8px 16px 8px 16px",
+            },
+          },
+          css: { background: "#ffffff", borderRadius: "8px" },
+          children: [],
+        },
+        6,
+        0,
+        "react-tailwind",
+      ),
+    ).toBe(
+      '<div className="flex flex-col justify-between items-center [gap:12px] [padding:8px_16px_8px_16px] [background:#ffffff] [border-radius:8px]" data-name="Card" />',
+    );
+  });
+
+  it("react-tailwind: TEXT color/font as arbitrary classes", () => {
+    expect(
+      codegenNode(
+        {
+          type: "TEXT",
+          name: "T",
+          css: { background: "#111111" },
+          text: { characters: "Hi", fontSize: 20, fontName: { family: "Inter" } },
+        },
+        6,
+        0,
+        "react-tailwind",
+      ),
+    ).toBe(
+      '<span className="[color:#111111] [font-size:20px] [font-family:Inter]" data-name="T">{"Hi"}</span>',
+    );
+  });
 });

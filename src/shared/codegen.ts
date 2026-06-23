@@ -50,16 +50,75 @@ function mergedStyle(node: CodegenNode): Record<string, unknown> {
   return out;
 }
 
-/** style={{ … }} — a JSX inline style attribute from a plain css object. */
-function styleAttr(style: Record<string, unknown>): string {
-  const keys = Object.keys(style);
-  if (keys.length === 0) {
+export type Framework = "react-inline" | "react-tailwind";
+
+function camelToKebab(s: string): string {
+  return s.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+}
+
+/** Map one css declaration to a Tailwind class (nice utility, else arbitrary property). */
+function tailwindClass(key: string, value: unknown): string {
+  const v = String(value);
+  if (key === "display" && v === "flex") {
+    return "flex";
+  }
+  if (key === "flexDirection") {
+    return v === "row"
+      ? "flex-row"
+      : v === "column"
+        ? "flex-col"
+        : `[flex-direction:${v}]`;
+  }
+  if (key === "flexWrap" && v === "wrap") {
+    return "flex-wrap";
+  }
+  if (
+    key === "position" &&
+    (v === "absolute" || v === "relative" || v === "fixed")
+  ) {
+    return v;
+  }
+  if (key === "justifyContent") {
+    const m: Record<string, string> = {
+      "flex-start": "justify-start",
+      center: "justify-center",
+      "flex-end": "justify-end",
+      "space-between": "justify-between",
+    };
+    return m[v] ?? `[justify-content:${v}]`;
+  }
+  if (key === "alignItems") {
+    const m: Record<string, string> = {
+      "flex-start": "items-start",
+      center: "items-center",
+      "flex-end": "items-end",
+      baseline: "items-baseline",
+    };
+    return m[v] ?? `[align-items:${v}]`;
+  }
+  // Generic arbitrary-property class: [border-radius:8px], [padding:8px_16px], …
+  return `[${camelToKebab(key)}:${v.replace(/\s+/g, "_")}]`;
+}
+
+function cssToTailwind(style: Record<string, unknown>): string {
+  return Object.entries(style)
+    .map(([k, v]) => tailwindClass(k, v))
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Render the style as a JSX attribute: inline `style={{…}}` or Tailwind `className="…"`. */
+function attr(style: Record<string, unknown>, framework: Framework): string {
+  if (Object.keys(style).length === 0) {
     return "";
   }
-  const entries = keys.map((k) => {
-    const v = style[k];
-    return typeof v === "number" ? `${k}: ${v}` : `${k}: "${esc(String(v))}"`;
-  });
+  if (framework === "react-tailwind") {
+    const cls = cssToTailwind(style);
+    return cls ? ` className="${esc(cls)}"` : "";
+  }
+  const entries = Object.entries(style).map(([k, v]) =>
+    typeof v === "number" ? `${k}: ${v}` : `${k}: "${esc(String(v))}"`,
+  );
   return ` style={{ ${entries.join(", ")} }}`;
 }
 
@@ -135,10 +194,16 @@ function imageHashOf(node: CodegenNode): string | undefined {
 }
 
 /**
- * Emit a React inline-style JSX tree for a serialized node (depth-limited).
- * Returns the JSX as a string; the agent wraps it in a component.
+ * Emit a React JSX tree for a serialized node (depth-limited). `framework` picks
+ * inline `style={{…}}` (react-inline) or `className` Tailwind classes
+ * (react-tailwind). Returns the JSX as a string; the agent wraps it in a component.
  */
-export function codegenNode(node: CodegenNode, depth = 6, indent = 0): string {
+export function codegenNode(
+  node: CodegenNode,
+  depth = 6,
+  indent = 0,
+  framework: Framework = "react-inline",
+): string {
   const pad = "  ".repeat(indent);
   const name = typeof node.name === "string" ? node.name : "";
   const dataName = name ? ` data-name="${esc(name)}"` : "";
@@ -150,15 +215,15 @@ export function codegenNode(node: CodegenNode, depth = 6, indent = 0): string {
 
   if (node.type === "TEXT") {
     const text = String(asObj(node.text)?.characters ?? "");
-    return `${pad}<span${styleAttr(textStyle(node))}${dataName}>{${JSON.stringify(text)}}</span>`;
+    return `${pad}<span${attr(textStyle(node), framework)}${dataName}>{${JSON.stringify(text)}}</span>`;
   }
 
   const imgHash = imageHashOf(node);
   if (imgHash) {
-    return `${pad}<img${styleAttr(mergedStyle(node))}${dataName} data-raster="${esc(imgHash)}" alt="${esc(name)}" />`;
+    return `${pad}<img${attr(mergedStyle(node), framework)}${dataName} data-raster="${esc(imgHash)}" alt="${esc(name)}" />`;
   }
 
-  const sa = styleAttr(mergedStyle(node));
+  const sa = attr(mergedStyle(node), framework);
   const kids = Array.isArray(node.children)
     ? (node.children as CodegenNode[])
     : [];
@@ -169,7 +234,7 @@ export function codegenNode(node: CodegenNode, depth = 6, indent = 0): string {
     return `${pad}<div${sa}${dataName}>{/* ${kids.length} children omitted (depth) */}</div>`;
   }
   const inner = kids
-    .map((c) => codegenNode(c, depth - 1, indent + 1))
+    .map((c) => codegenNode(c, depth - 1, indent + 1, framework))
     .join("\n");
   return `${pad}<div${sa}${dataName}>\n${inner}\n${pad}</div>`;
 }
