@@ -16,11 +16,12 @@ import {
   searchNodes,
 } from "../shared/exportNodes.js";
 import { sniffImageMime } from "../shared/raster.js";
+import { codegenNode } from "../shared/codegen.js";
 
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.4.0" },
+  { name: "mcp-bridge-figma", version: "0.5.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -305,6 +306,40 @@ server.registerTool(
         { type: "image" as const, data: b64, mimeType },
       ],
     };
+  },
+);
+
+server.registerTool(
+  "figma_bridge_codegen",
+  {
+    description:
+      'Generate a React inline-style JSX skeleton for ONE node (by id) from an export, composing the serializer\'s css/layout.css. TEXT -> <span> with color/font, vector -> inline <svg>, IMAGE fill -> <img data-raster=…> (fetch bytes via figma_bridge_get_raster). A deterministic scaffold to iterate on, not final code. Accepts name:"latest".',
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(5)
+        .describe('Export basename ending in .json, or "latest"'),
+      nodeId: z.string().min(1).describe('Node id, e.g. "12:345"'),
+      depth: z.number().int().min(0).max(50).optional().default(8),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(20_000_000)
+        .optional()
+        .default(8_000_000),
+    }),
+  },
+  async ({ name, nodeId, depth, maxBytes }) => {
+    const res = await loadExport(name, maxBytes);
+    if (!res.ok) {
+      return { ...jsonText(res.error), isError: true };
+    }
+    const node = findNodeById(asRoots(res.data.roots), nodeId);
+    if (!node) {
+      return { ...jsonText({ error: "node_not_found", nodeId }), isError: true };
+    }
+    return { content: [{ type: "text" as const, text: codegenNode(node, depth) }] };
   },
 );
 
