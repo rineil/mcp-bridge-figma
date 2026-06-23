@@ -26,7 +26,7 @@ import {
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.7.0" },
+  { name: "mcp-bridge-figma", version: "0.9.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -161,7 +161,7 @@ server.registerTool(
           {
             phase1: "Per-node scene graph: bbox (space=absolute|relative) + `rel` (parent-relative box), fills/strokes (`cssColor` #hex/rgba, gradients incl. ready `cssGradient`), and a consolidated per-node `css` block (background/border/borderRadius/boxShadow/filter/opacity + absolute position when not an auto-layout child). Containers also have `layout`+`layout.css` (flexbox); children have `layoutSelf` (FILL/HUG/FIXED). Vector `geometry.fillGeometry` (SVG paths), isMask, corner radii, stroke dash/cap/join.",
             phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor, plus `byMode` [{mode,value,cssColor}] for multi-mode collections e.g. light/dark) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight + CSS-ready cssLineHeight/cssLetterSpacing/cssTextTransform/cssTextDecoration; effect detail; style IDs.",
-            phase3: "Adds component/variant/instance metadata, mainComponent refs (group repeated instances with figma_bridge_list_components), optional PNG raster (base64) for small nodes when enabled in plugin.",
+            phase3: "Adds component/variant/instance metadata + mainComponent refs + per-instance component.overrides; a top-level `components` registry of LOCAL component definitions (read via figma_bridge_read_component; group instances with figma_bridge_list_components). Optional PNG raster for small nodes when enabled in plugin.",
             notes: "Pass name:\"latest\" to any read tool to target the newest export. Each node has a ready `css` block + cssColor/cssGradient — apply them directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, figma_bridge_get_raster returns an MCP image block (the agent can SEE it) keyed by node id or imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
@@ -318,13 +318,17 @@ server.registerTool(
   "figma_bridge_codegen",
   {
     description:
-      'Generate a React inline-style JSX skeleton for ONE node (by id) from an export, composing the serializer\'s css/layout.css. TEXT -> <span> with color/font, vector -> inline <svg>, IMAGE fill -> <img data-raster=…> (fetch bytes via figma_bridge_get_raster). A deterministic scaffold to iterate on, not final code. Accepts name:"latest".',
+      'Generate a React JSX skeleton for ONE node (by id) from an export, composing the serializer\'s css/layout.css. `framework`: "react-inline" (style={{…}}) or "react-tailwind" (className utilities + arbitrary values). TEXT -> <span> with color/font, vector -> inline <svg>, IMAGE fill -> <img data-raster=…> (fetch bytes via figma_bridge_get_raster). A deterministic scaffold to iterate on, not final code. Accepts name:"latest".',
     inputSchema: z.object({
       name: z
         .string()
         .min(5)
         .describe('Export basename ending in .json, or "latest"'),
       nodeId: z.string().min(1).describe('Node id, e.g. "12:345"'),
+      framework: z
+        .enum(["react-inline", "react-tailwind"])
+        .optional()
+        .default("react-inline"),
       depth: z.number().int().min(0).max(50).optional().default(8),
       maxBytes: z
         .number()
@@ -335,7 +339,7 @@ server.registerTool(
         .default(8_000_000),
     }),
   },
-  async ({ name, nodeId, depth, maxBytes }) => {
+  async ({ name, nodeId, framework, depth, maxBytes }) => {
     const res = await loadExport(name, maxBytes);
     if (!res.ok) {
       return { ...jsonText(res.error), isError: true };
@@ -344,7 +348,11 @@ server.registerTool(
     if (!node) {
       return { ...jsonText({ error: "node_not_found", nodeId }), isError: true };
     }
-    return { content: [{ type: "text" as const, text: codegenNode(node, depth) }] };
+    return {
+      content: [
+        { type: "text" as const, text: codegenNode(node, depth, 0, framework) },
+      ],
+    };
   },
 );
 
@@ -372,8 +380,60 @@ server.registerTool(
     if (!res.ok) {
       return { ...jsonText(res.error), isError: true };
     }
-    const components = componentInventory(asRoots(res.data.roots));
+    const registry = (res.data.components ?? {}) as Record<string, unknown>;
+    const components = componentInventory(asRoots(res.data.roots)).map((c) => ({
+      ...c,
+      // A canonical definition is available via figma_bridge_read_component.
+      hasDefinition: Object.prototype.hasOwnProperty.call(registry, c.id),
+    }));
     return jsonText({ count: components.length, components });
+  },
+);
+
+server.registerTool(
+  "figma_bridge_read_component",
+  {
+    description:
+      'Read a component DEFINITION subtree from an export by its main-component id (from figma_bridge_list_components, or component.mainComponent.id). The canonical, deduplicated definition — instances carry component.overrides for per-instance diffs. Registry is built at phase 3 for LOCAL components. Accepts name:"latest".',
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(5)
+        .describe('Export basename ending in .json, or "latest"'),
+      componentId: z.string().min(1).describe('Main component id, e.g. "12:3"'),
+      depth: z.number().int().min(0).max(50).optional(),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(20_000_000)
+        .optional()
+        .default(8_000_000),
+    }),
+  },
+  async ({ name, componentId, depth, maxBytes }) => {
+    const res = await loadExport(name, maxBytes);
+    if (!res.ok) {
+      return { ...jsonText(res.error), isError: true };
+    }
+    const components = (res.data.components ?? {}) as Record<string, unknown>;
+    const def = components[componentId];
+    if (def === undefined) {
+      return {
+        ...jsonText({
+          error: "component_not_found",
+          componentId,
+          available: Object.keys(components),
+          hint: "The registry is built at phase 3 for LOCAL components only.",
+        }),
+        isError: true,
+      };
+    }
+    const out =
+      typeof depth === "number" && def && typeof def === "object"
+        ? limitDepth(def as Record<string, unknown>, depth)
+        : def;
+    return jsonText(out);
   },
 );
 
