@@ -210,7 +210,9 @@ exports/            # nơi JSON xuất ra (gitignored, trừ .gitkeep)
 - `src/**` check bằng `tsconfig.json`; `plugin/**` check riêng bằng `tsconfig.plugin.json` (esbuild chỉ transpile, không type-check).
 - **CI** (`.github/workflows/ci.yml`): install (frozen lockfile) → typecheck src + plugin → test → build 2 bundle → smoke "stdout MCP byte đầu là `{`".
 
-**Quy trình nhánh:** tạo feature branch từ `develop` → PR base `develop` → merge. Phát hành: PR `develop` → `main`.
+**Quy trình nhánh:** tạo feature branch từ `develop` → PR base `develop` → merge. Phát hành: PR `develop` → `main`, rồi tag + GitHub Release.
+
+Lịch sử thay đổi: xem [CHANGELOG.md](CHANGELOG.md).
 
 ## Lưu ý / giới hạn
 
