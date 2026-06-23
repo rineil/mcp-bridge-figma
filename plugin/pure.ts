@@ -23,6 +23,358 @@ export function cssColor(
   return `rgba(${clampChannel(c.r)}, ${clampChannel(c.g)}, ${clampChannel(c.b)}, ${Math.round(a * 1000) / 1000})`;
 }
 
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+// --- effects -> CSS ----------------------------------------------------------
+
+/** Compose `box-shadow` from serialized DROP_SHADOW/INNER_SHADOW effects. */
+export function cssBoxShadow(effects: unknown): string | undefined {
+  if (!Array.isArray(effects)) {
+    return undefined;
+  }
+  const parts: string[] = [];
+  for (const e of effects) {
+    if (!e || typeof e !== "object") {
+      continue;
+    }
+    const o = e as Record<string, unknown>;
+    if (o.visible === false) {
+      continue;
+    }
+    if (o.type !== "DROP_SHADOW" && o.type !== "INNER_SHADOW") {
+      continue;
+    }
+    const off = (o.offset ?? {}) as Record<string, unknown>;
+    const x = num(off.x) ?? 0;
+    const y = num(off.y) ?? 0;
+    const blur = num(o.radius) ?? 0;
+    const spread = num(o.spread) ?? 0;
+    const color =
+      typeof o.cssColor === "string"
+        ? o.cssColor
+        : o.color && typeof o.color === "object"
+          ? cssColor(o.color as { r: number; g: number; b: number; a?: number })
+          : "rgba(0, 0, 0, 0.25)";
+    const inset = o.type === "INNER_SHADOW" ? "inset " : "";
+    parts.push(`${inset}${x}px ${y}px ${blur}px ${spread}px ${color}`);
+  }
+  return parts.length ? parts.join(", ") : undefined;
+}
+
+/** Map LAYER_BLUR -> filter:blur(), BACKGROUND_BLUR -> backdrop-filter:blur(). */
+export function cssBlurFilters(effects: unknown): {
+  filter?: string;
+  backdropFilter?: string;
+} {
+  const out: { filter?: string; backdropFilter?: string } = {};
+  if (!Array.isArray(effects)) {
+    return out;
+  }
+  for (const e of effects) {
+    if (!e || typeof e !== "object") {
+      continue;
+    }
+    const o = e as Record<string, unknown>;
+    if (o.visible === false) {
+      continue;
+    }
+    const r = num(o.radius);
+    if (r == null) {
+      continue;
+    }
+    if (o.type === "LAYER_BLUR") {
+      out.filter = `blur(${r}px)`;
+    }
+    if (o.type === "BACKGROUND_BLUR") {
+      out.backdropFilter = `blur(${r}px)`;
+    }
+  }
+  return out;
+}
+
+// --- text -> CSS -------------------------------------------------------------
+
+/** Figma lineHeight {value,unit} -> CSS ('normal' | 'Npx' | unitless ratio). */
+export function cssLineHeight(lh: unknown): string | undefined {
+  if (!lh || typeof lh !== "object") {
+    return undefined;
+  }
+  const o = lh as Record<string, unknown>;
+  if (o.unit === "AUTO") {
+    return "normal";
+  }
+  const v = num(o.value);
+  if (v == null) {
+    return undefined;
+  }
+  if (o.unit === "PIXELS") {
+    return `${v}px`;
+  }
+  if (o.unit === "PERCENT") {
+    return `${Math.round((v / 100) * 1000) / 1000}`;
+  }
+  return undefined;
+}
+
+/** Figma letterSpacing {value,unit} -> CSS ('Npx' | 'Nem'). */
+export function cssLetterSpacing(ls: unknown): string | undefined {
+  if (!ls || typeof ls !== "object") {
+    return undefined;
+  }
+  const o = ls as Record<string, unknown>;
+  const v = num(o.value);
+  if (v == null) {
+    return undefined;
+  }
+  if (o.unit === "PIXELS") {
+    return `${v}px`;
+  }
+  if (o.unit === "PERCENT") {
+    return `${Math.round((v / 100) * 1000) / 1000}em`;
+  }
+  return undefined;
+}
+
+export function cssTextTransform(textCase: unknown): string | undefined {
+  if (textCase === "UPPER") {
+    return "uppercase";
+  }
+  if (textCase === "LOWER") {
+    return "lowercase";
+  }
+  if (textCase === "TITLE") {
+    return "capitalize";
+  }
+  return undefined;
+}
+
+export function cssTextDecoration(td: unknown): string | undefined {
+  if (td === "UNDERLINE") {
+    return "underline";
+  }
+  if (td === "STRIKETHROUGH") {
+    return "line-through";
+  }
+  return undefined;
+}
+
+// --- gradients -> CSS --------------------------------------------------------
+
+type Mat = number[][];
+
+function invert2x3(m: Mat): Mat | null {
+  const a = m[0]?.[0];
+  const c = m[0]?.[1];
+  const e = m[0]?.[2];
+  const b = m[1]?.[0];
+  const d = m[1]?.[1];
+  const f = m[1]?.[2];
+  if ([a, b, c, d, e, f].some((n) => typeof n !== "number")) {
+    return null;
+  }
+  const det = (a as number) * (d as number) - (b as number) * (c as number);
+  if (Math.abs(det) < 1e-9) {
+    return null;
+  }
+  const ia = (d as number) / det;
+  const ib = -(b as number) / det;
+  const ic = -(c as number) / det;
+  const id = (a as number) / det;
+  const ie = -(ia * (e as number) + ic * (f as number));
+  const iff = -(ib * (e as number) + id * (f as number));
+  return [
+    [ia, ic, ie],
+    [ib, id, iff],
+  ];
+}
+
+function applyMat(m: Mat, x: number, y: number): { x: number; y: number } {
+  return {
+    x: m[0][0] * x + m[0][1] * y + m[0][2],
+    y: m[1][0] * x + m[1][1] * y + m[1][2],
+  };
+}
+
+/** "color pos%, color pos%, …" from serialized gradient stops. */
+export function gradientStopsCss(stops: unknown): string {
+  if (!Array.isArray(stops)) {
+    return "";
+  }
+  return stops
+    .map((s): string | null => {
+      if (!s || typeof s !== "object") {
+        return null;
+      }
+      const o = s as Record<string, unknown>;
+      const color =
+        typeof o.cssColor === "string"
+          ? o.cssColor
+          : o.color && typeof o.color === "object"
+            ? cssColor(o.color as { r: number; g: number; b: number; a?: number })
+            : null;
+      if (!color) {
+        return null;
+      }
+      const pos = num(o.position);
+      return pos == null ? color : `${color} ${Math.round(pos * 1000) / 10}%`;
+    })
+    .filter((s): s is string => s != null)
+    .join(", ");
+}
+
+/**
+ * Approximate a Figma gradient paint as a CSS gradient string. LINEAR recovers
+ * the angle from the inverted gradientTransform mapped onto the element box;
+ * RADIAL/DIAMOND -> radial-gradient, ANGULAR -> conic-gradient (centered approx).
+ * width/height refine the linear angle for non-square boxes (default square).
+ * Note: radial/angular/diamond are approximations of Figma's exact geometry.
+ */
+export function cssGradient(
+  paint: unknown,
+  width = 1,
+  height = 1,
+): string | undefined {
+  if (!paint || typeof paint !== "object") {
+    return undefined;
+  }
+  const o = paint as Record<string, unknown>;
+  const stopStr = gradientStopsCss(o.gradientStops);
+  if (!stopStr) {
+    return undefined;
+  }
+  if (o.type === "GRADIENT_LINEAR") {
+    let angle = 180;
+    const inv = Array.isArray(o.gradientTransform)
+      ? invert2x3(o.gradientTransform as Mat)
+      : null;
+    if (inv) {
+      const start = applyMat(inv, 0, 0.5);
+      const end = applyMat(inv, 1, 0.5);
+      const dx = (end.x - start.x) * (width || 1);
+      const dy = (end.y - start.y) * (height || 1);
+      let a = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+      a = ((a % 360) + 360) % 360;
+      angle = Math.round(a * 10) / 10;
+    }
+    return `linear-gradient(${angle}deg, ${stopStr})`;
+  }
+  if (o.type === "GRADIENT_RADIAL" || o.type === "GRADIENT_DIAMOND") {
+    return `radial-gradient(${stopStr})`;
+  }
+  if (o.type === "GRADIENT_ANGULAR") {
+    return `conic-gradient(${stopStr})`;
+  }
+  return undefined;
+}
+
+// --- per-node CSS block ------------------------------------------------------
+
+function pickTopPaint(paints: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(paints)) {
+    return undefined;
+  }
+  for (let i = paints.length - 1; i >= 0; i--) {
+    const p = paints[i];
+    if (
+      p &&
+      typeof p === "object" &&
+      (p as Record<string, unknown>).visible !== false
+    ) {
+      return p as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+function paintToBackground(p: Record<string, unknown>): string | undefined {
+  if (p.type === "SOLID" && typeof p.cssColor === "string") {
+    return p.cssColor;
+  }
+  if (typeof p.cssGradient === "string") {
+    return p.cssGradient;
+  }
+  return undefined;
+}
+
+/**
+ * Compose a ready-to-apply CSS block for a serialized node from its already-derived
+ * pieces (cssColor/cssGradient/cssBoxShadow + corner radii + opacity). When
+ * `opts.absolute`, adds position/left/top/width/height from the node's `rel` box.
+ */
+export function buildNodeCss(
+  base: Record<string, unknown>,
+  opts: { absolute?: boolean } = {},
+): Record<string, unknown> | undefined {
+  const css: Record<string, unknown> = {};
+
+  const fill = pickTopPaint(base.fills);
+  if (fill) {
+    const bg = paintToBackground(fill);
+    if (bg) {
+      css.background = bg;
+    }
+  }
+
+  const strokeWeight = num(base.strokeWeight);
+  const stroke = pickTopPaint(base.strokes);
+  if (stroke && strokeWeight != null && strokeWeight > 0) {
+    const c = stroke.cssColor;
+    if (typeof c === "string") {
+      css.border = `${strokeWeight}px solid ${c}`;
+    }
+  }
+
+  const radius = num(base.cornerRadius);
+  if (radius != null && radius > 0) {
+    css.borderRadius = `${radius}px`;
+  } else if (Array.isArray(base.rectangleCornerRadii)) {
+    const vals = (base.rectangleCornerRadii as unknown[]).map((x) => num(x) ?? 0);
+    if (vals.length === 4 && vals.some((v) => v > 0)) {
+      css.borderRadius = `${vals[0]}px ${vals[1]}px ${vals[2]}px ${vals[3]}px`;
+    }
+  }
+
+  const shadow = cssBoxShadow(base.effects);
+  if (shadow) {
+    css.boxShadow = shadow;
+  }
+  const { filter, backdropFilter } = cssBlurFilters(base.effects);
+  if (filter) {
+    css.filter = filter;
+  }
+  if (backdropFilter) {
+    css.backdropFilter = backdropFilter;
+  }
+
+  const opacity = num(base.opacity);
+  if (opacity != null && opacity < 1) {
+    css.opacity = opacity;
+  }
+
+  if (opts.absolute && base.rel && typeof base.rel === "object") {
+    const rel = base.rel as Record<string, unknown>;
+    const x = num(rel.x);
+    const y = num(rel.y);
+    if (x != null && y != null) {
+      css.position = "absolute";
+      css.left = `${x}px`;
+      css.top = `${y}px`;
+      const w = num(rel.width);
+      const h = num(rel.height);
+      if (w != null) {
+        css.width = `${w}px`;
+      }
+      if (h != null) {
+        css.height = `${h}px`;
+      }
+    }
+  }
+
+  return Object.keys(css).length ? css : undefined;
+}
+
 export type RawVar = {
   id: string;
   name: string;

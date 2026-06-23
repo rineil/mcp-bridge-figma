@@ -147,23 +147,23 @@ Gợi ý prompt cho AGENT để dựng UI hiệu quả mà không nổ context:
 2. `figma_bridge_export_outline` → nắm cấu trúc màn hình.
 3. `figma_bridge_search_nodes` / `figma_bridge_read_node` → đọc từng frame cần dựng.
 4. Khi sinh code:
-   - Dùng thẳng **`cssColor`** (đã `#hex`/`rgba`), không tự tính từ `{r,g,b}`.
-   - Dùng **`layout.css`** (block flexbox đã map sẵn) cho frame auto-layout; dùng **`layoutSelf`** cho FILL/HUG/FIXED/grow của từng con.
-   - Dùng **`rel`** cho vị trí absolute; **`text.segments`** cho rich text; **`geometry.fillGeometry`** để render icon bằng `<path d>`.
+   - Áp thẳng **`css`** của node (background/border/radius/shadow/opacity/vị trí đã tính sẵn) — đỡ phải tự ráp từng thuộc tính; `cssColor`/`cssGradient` là giá trị đã resolve.
+   - Frame auto-layout: dùng **`layout.css`** (flexbox) + **`layoutSelf`** cho FILL/HUG/FIXED/grow của từng con (thay cho `position:absolute`).
+   - **`text.segments`** (+ `cssLineHeight`/`cssLetterSpacing`/…) cho rich text; **`geometry.fillGeometry`** render icon bằng `<path d>`.
    - Màu/spacing là token? Đọc `tokens` ngay tại paint hoặc bảng `variables` (đã resolve) để đặt tên biến/Tailwind theme thay vì hard-code.
 
 > Luồng khuyến nghị cho file lớn: `export_outline` → `search_nodes` → `read_node` (thay vì `read_export` đọc cả file).
 
 ## Schema JSON
 
-Xem `schema/export-v3.schema.json` — `roots[]` theo `$defs/node`. Mỗi node (plugin v0.4+) gồm:
+Xem `schema/export-v3.schema.json` — `roots[]` theo `$defs/node`. Mỗi node (plugin v0.5+) gồm:
 
-- `bbox` có `space: "absolute" | "relative"` (đừng trộn 2 hệ toạ độ); thêm `rel` — hộp **tương đối với parent** (left/top/width/height sẵn cho CSS absolute).
-- `layout` — auto-layout của container (gồm `layoutGrids` và `css` — block flexbox sẵn dùng).
-- `layoutSelf` — sizing/độ co giãn theo từng node: `constraints`, `layoutSizingHorizontal/Vertical` (FIXED/HUG/FILL), `layoutGrow`, `layoutAlign`, `min/maxWidth/Height`.
-- `fills`/`strokes` — màu có sẵn **`cssColor`**; gradient lưu **đầy đủ stops (kèm cssColor) + `gradientTransform`**; stroke có `dashPattern`/`strokeCap`/`strokeJoin`.
-- `geometry` — vector path (`fillGeometry`/`strokeGeometry` dạng SVG path) cho VECTOR/BOOLEAN_OPERATION/LINE/POLYGON/STAR.
-- `text.segments` (phase ≥ 2) — style theo từng đoạn (đậm/màu/cỡ riêng) thay vì gộp `"mixed"`; thêm `fontWeight`.
+- **`css`** — block CSS **sẵn dùng cho chính node**: `background` (cssColor/cssGradient), `border`, `borderRadius`, `boxShadow`, `filter`/`backdropFilter`, `opacity`, và (khi node **không** là con auto-layout) `position/left/top/width/height` từ `rel`.
+- `bbox` có `space: "absolute" | "relative"` (đừng trộn 2 hệ toạ độ); `rel` — hộp **tương đối với parent**.
+- `layout` — auto-layout container (gồm `layoutGrids` + `css` flexbox); `layoutSelf` — `constraints`, `layoutSizingHorizontal/Vertical` (FIXED/HUG/FILL), `layoutGrow`, `layoutAlign`, `min/maxWidth/Height`.
+- `fills`/`strokes` — màu có sẵn **`cssColor`**; gradient có **stops + `gradientTransform` + `cssGradient`** (chuỗi linear/radial/conic; radial/angular/diamond là xấp xỉ); stroke có `dashPattern`/`strokeCap`/`strokeJoin`.
+- `geometry` — vector path (`fillGeometry`/`strokeGeometry` SVG) → dựng icon bằng `<path d>`.
+- `text.segments` (phase ≥ 2) — style từng đoạn + `fontWeight` + `cssLineHeight`/`cssLetterSpacing`/`cssTextTransform`/`cssTextDecoration`.
 - `isMask`/`maskType`.
 
 Phase ≥ 2: `variables` là **bảng token gọn** (chỉ token được tham chiếu, đã resolve `value` + `cssColor` theo mode mặc định); paint nào bind variable có thêm `tokens` ngay tại paint. Phase 3 thêm component/variant + raster (`rasters` map: node id hoặc image hash → base64; lấy qua `figma_bridge_get_raster`).
