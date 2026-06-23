@@ -18,6 +18,7 @@
         "pageId": { "type": "string" },
         "pageName": { "type": "string" },
         "nodeCount": { "type": "integer" },
+        "omittedCount": { "type": "integer", "description": "Nodes dropped as `omitted` for hitting maxNodes/maxDepth (0 = nothing truncated)." },
         "maxDepth": { "type": "integer" },
         "maxNodes": { "type": "integer" }
       }
