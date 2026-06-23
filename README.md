@@ -22,7 +22,7 @@ Plugin (chạy ngay trong Figma) là con đường **miễn phí** duy nhất kh
 
 ## Yêu cầu
 
-- Node 20+
+- Node 22+ (bộ công cụ dùng pnpm 11.8, yêu cầu Node ≥ 22.13; bản MCP/bridge build ra vẫn chạy Node 20+)
 - [pnpm](https://pnpm.io/)
 - Figma (desktop hoặc web) để import plugin dạng development
 
