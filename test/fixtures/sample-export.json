@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "pluginVersion": "0.4.0",
+    "phase": 3,
+    "scope": "selection",
+    "exportedAt": "2026-01-01T00:00:00.000Z",
+    "nodeCount": 4,
+    "maxNodes": 8000
+  },
+  "roots": [
+    {
+      "id": "1:1",
+      "type": "FRAME",
+      "name": "Login Screen",
+      "bbox": { "x": 0, "y": 0, "width": 375, "height": 812, "space": "absolute" },
+      "layout": {
+        "layoutMode": "VERTICAL",
+        "css": { "display": "flex", "flexDirection": "column" }
+      },
+      "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 1, "b": 1 }, "cssColor": "#ffffff" }],
+      "children": [
+        {
+          "id": "1:2",
+          "type": "TEXT",
+          "name": "Title",
+          "bbox": { "x": 16, "y": 40, "width": 200, "height": 32 },
+          "text": { "characters": "Welcome" }
+        },
+        {
+          "id": "1:3",
+          "type": "FRAME",
+          "name": "Button",
+          "bbox": { "x": 16, "y": 700, "width": 343, "height": 48 },
+          "children": [
+            {
+              "id": "1:4",
+              "type": "VECTOR",
+              "name": "Home Icon",
+              "geometry": {
+                "fillGeometry": [{ "windingRule": "NONZERO", "data": "M0 0h10v10H0z" }]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variables": {
+    "collections": [{ "id": "C1", "name": "Brand" }],
+    "variables": [{ "id": "V1", "name": "color/primary", "cssColor": "#1a33e6" }]
+  },
+  "rasters": { "abc123hash": "QUJD", "1:4": "UE5H" }
+}
