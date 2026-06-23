@@ -9,6 +9,21 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Chưa có thay đổi chưa phát hành._
 
+## [0.7.0] - 2026-06-23
+
+Hoàn tất phần "nặng" của dedup component + codegen. Phiên bản: plugin `0.7.0`, MCP server `0.9.0`.
+
+### Added
+
+- **Registry định nghĩa component + override per-instance**: phase 3 serialize mỗi
+  main component **local** một lần vào `components` (resolve qua `getNodeByIdAsync`,
+  counter riêng, cap 40); INSTANCE thêm `component.overrides` (`inst.overrides`).
+  Tool **`figma_bridge_read_component`** đọc định nghĩa; `list_components` đánh dấu
+  `hasDefinition` ([#22](https://github.com/rineil/mcp-bridge-figma/pull/22)).
+- **`figma_bridge_codegen` thêm `framework: "react-tailwind"`** (className utilities
+  + arbitrary props) bên cạnh `react-inline`
+  ([#23](https://github.com/rineil/mcp-bridge-figma/pull/23)).
+
 ## [0.6.0] - 2026-06-23
 
 Nhóm tính năng nâng cao cho việc dựng UI. Phiên bản: plugin `0.6.0`, MCP server `0.7.0`.
@@ -108,7 +123,8 @@ kế Figma ra JSON cục bộ.
   server-side + `writeFile` cờ `wx` (không ghi đè), `/health` không lộ `exportDir`
   ([#5](https://github.com/rineil/mcp-bridge-figma/pull/5)).
 
-[Unreleased]: https://github.com/rineil/mcp-bridge-figma/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/rineil/mcp-bridge-figma/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/rineil/mcp-bridge-figma/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rineil/mcp-bridge-figma/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rineil/mcp-bridge-figma/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rineil/mcp-bridge-figma/releases/tag/v0.4.0
