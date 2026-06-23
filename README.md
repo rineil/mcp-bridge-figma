@@ -22,7 +22,7 @@ Plugin (chạy ngay trong Figma) là con đường **miễn phí** duy nhất kh
 
 ## Yêu cầu
 
-- Node 20+
+- Node 22+ (bộ công cụ dùng pnpm 11.8, yêu cầu Node ≥ 22.13; bản MCP/bridge build ra vẫn chạy Node 20+)
 - [pnpm](https://pnpm.io/)
 - Figma (desktop hoặc web) để import plugin dạng development
 
@@ -175,12 +175,14 @@ plugin/
   manifest.json     # khai báo plugin (documentAccess: dynamic-page, devAllowedDomains)
   main.ts           # UI plugin + gửi POST (kèm X-Bridge-Token) lên bridge
   serialize.ts      # serialize scene graph Figma -> JSON (trái tim của tool)
+  pure.ts           # helper thuần, figma-free (cssColor, resolveTokens…) — test được
 src/
   bridge/server.ts  # HTTP bridge: nhận POST, ghi exports/ (token-gated)
   mcp/server.ts      # MCP stdio: list/outline/read_node/search/get_raster/...
-  shared/            # tiện ích dùng chung (exportPaths, safeExportName, exportNodes)
+  shared/            # tiện ích dùng chung (exportPaths, safeExportName, exportNaming, exportNodes)
 schema/
   export-v3.schema.json
+test/               # vitest: pure/exportNodes/exportNaming/safeExportName + fixture
 exports/            # nơi JSON xuất ra (gitignored, trừ .gitkeep)
 ```
 
@@ -193,8 +195,12 @@ exports/            # nơi JSON xuất ra (gitignored, trừ .gitkeep)
 | `pnpm bridge` | Chạy HTTP bridge (tsx) |
 | `pnpm mcp` | Chạy MCP qua tsx (dev) |
 | `pnpm typecheck` | `tsc --noEmit` cho `src/**` |
+| `pnpm typecheck:plugin` | Type-check `plugin/**` (tsconfig.plugin.json + figma typings) |
+| `pnpm test` | Unit test (vitest) cho các helper thuần |
 
-`tsconfig.json` chỉ check `src/**`; plugin được transpile bằng esbuild (không type-check khi build). Có 3 cảnh báo `=== figma.mixed` (TS2367) tồn tại sẵn trong `plugin/serialize.ts` — vô hại lúc runtime (đúng cách dùng Figma, chỉ là hạn chế typings).
+- Helper thuần (figma-free) nằm ở `plugin/pure.ts` + `src/shared/*` để **test được** mà không cần runtime Figma; xem `test/`.
+- `src/**` check bằng `tsconfig.json`; `plugin/**` check riêng bằng `tsconfig.plugin.json` (esbuild chỉ transpile, không type-check).
+- **CI** (`.github/workflows/ci.yml`): install (frozen lockfile) → typecheck src + plugin → test → build 2 bundle → smoke "stdout MCP byte đầu là `{`".
 
 **Quy trình nhánh:** tạo feature branch từ `develop` → PR base `develop` → merge. Phát hành: PR `develop` → `main`.
 
