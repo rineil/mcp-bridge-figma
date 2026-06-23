@@ -16,7 +16,7 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.5.1";
+const PLUGIN_VERSION = "0.6.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;

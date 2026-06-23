@@ -382,7 +382,12 @@ export type RawVar = {
   variableCollectionId: string;
   valuesByMode: Record<string, unknown>;
 };
-export type RawCol = { id: string; name: string; defaultModeId: string };
+export type RawCol = {
+  id: string;
+  name: string;
+  defaultModeId: string;
+  modes?: Array<{ modeId: string; name: string }>;
+};
 export type VarSnapshot = { collections: unknown[]; variables: unknown[] };
 
 export function isAlias(
@@ -418,6 +423,48 @@ export function resolveVar(
   const val = modeId ? v.valuesByMode[modeId] : undefined;
   if (isAlias(val)) {
     return resolveVar(val.id, varsById, colsById, depth + 1);
+  }
+  const out: { value: unknown; cssColor?: string } = { value: val };
+  if (
+    v.resolvedType === "COLOR" &&
+    val &&
+    typeof val === "object" &&
+    "r" in (val as Record<string, unknown>)
+  ) {
+    out.cssColor = cssColor(
+      val as { r: number; g: number; b: number; a?: number },
+    );
+  }
+  return out;
+}
+
+/** Resolve a variable for a SPECIFIC mode (for light/dark), following aliases in that mode. */
+export function resolveVarMode(
+  id: string,
+  modeId: string,
+  varsById: Map<string, RawVar>,
+  colsById: Map<string, RawCol>,
+  depth = 0,
+): { value: unknown; cssColor?: string } | null {
+  if (depth > 8) {
+    return null;
+  }
+  const v = varsById.get(id);
+  if (!v) {
+    return null;
+  }
+  let val: unknown =
+    modeId in v.valuesByMode ? v.valuesByMode[modeId] : undefined;
+  if (val === undefined) {
+    // This variable's collection doesn't have that mode: fall back to its default.
+    const col = colsById.get(v.variableCollectionId);
+    const dm = col?.defaultModeId;
+    const key =
+      dm && dm in v.valuesByMode ? dm : Object.keys(v.valuesByMode)[0];
+    val = key ? v.valuesByMode[key] : undefined;
+  }
+  if (isAlias(val)) {
+    return resolveVarMode(val.id, modeId, varsById, colsById, depth + 1);
   }
   const out: { value: unknown; cssColor?: string } = { value: val };
   if (
@@ -534,16 +581,27 @@ export function resolveTokens(
     .filter((v) => referenced.has(v.id))
     .map((v) => {
       const r = resolveVar(v.id, varsById, colsById);
-      return {
+      const col = colsById.get(v.variableCollectionId);
+      const out: Record<string, unknown> = {
         id: v.id,
         name: v.name,
         resolvedType: v.resolvedType,
-        collection: colsById.get(v.variableCollectionId)?.name,
+        collection: col?.name,
         variableCollectionId: v.variableCollectionId,
         value: r?.value,
         cssColor: r?.cssColor,
         valuesByMode: v.valuesByMode,
       };
+      // Multi-mode (light/dark): resolve each mode so the agent can emit
+      // dark-mode CSS vars / Tailwind dark: variants. Only when >1 mode.
+      const modes = col?.modes ?? [];
+      if (modes.length > 1) {
+        out.byMode = modes.map((m) => {
+          const mr = resolveVarMode(v.id, m.modeId, varsById, colsById);
+          return { mode: m.name, value: mr?.value, cssColor: mr?.cssColor };
+        });
+      }
+      return out;
     });
   const usedCols = new Set(variables.map((v) => v.variableCollectionId));
   const collections = (snapshot.collections as Array<{ id: string }>).filter(

@@ -30,7 +30,7 @@
     },
     "variables": {
       "type": ["object", "null"],
-      "description": "Present when phase >= 2: COMPACT, referenced-only token table. Each variable is resolved to its default-mode `value` (+ `cssColor` for COLOR). Paints that bind a variable also carry a resolved `tokens` map at the paint."
+      "description": "Present when phase >= 2: COMPACT, referenced-only token table. Each variable is resolved to its default-mode `value` (+ `cssColor` for COLOR), and — when its collection has multiple modes (e.g. light/dark) — a `byMode` array [{mode,value,cssColor}] resolving every mode (aliases followed per mode). Paints that bind a variable also carry a resolved `tokens` map at the paint."
     },
     "rasters": {
       "type": "object",
