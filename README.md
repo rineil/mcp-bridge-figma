@@ -171,7 +171,7 @@ Xem `schema/export-v3.schema.json` — `roots[]` theo `$defs/node`. Mỗi node (
 - `text.segments` (phase ≥ 2) — style từng đoạn + `fontWeight` + `cssLineHeight`/`cssLetterSpacing`/`cssTextTransform`/`cssTextDecoration`.
 - `isMask`/`maskType`.
 
-Phase ≥ 2: `variables` là **bảng token gọn** (chỉ token được tham chiếu, đã resolve `value` + `cssColor` theo mode mặc định); paint nào bind variable có thêm `tokens` ngay tại paint. Phase 3 thêm component/variant + raster (`rasters` map: node id hoặc image hash → base64; lấy qua `figma_bridge_get_raster`).
+Phase ≥ 2: `variables` là **bảng token gọn** (chỉ token được tham chiếu, đã resolve `value` + `cssColor` theo mode mặc định; collection nhiều mode — vd light/dark — có thêm `byMode` `[{mode,value,cssColor}]` resolve mọi mode để sinh `:root`/`.dark`); paint nào bind variable có thêm `tokens` ngay tại paint. Phase 3 thêm component/variant + raster (`rasters` map: node id hoặc image hash → base64; lấy qua `figma_bridge_get_raster`).
 
 ## Cấu trúc dự án
 
