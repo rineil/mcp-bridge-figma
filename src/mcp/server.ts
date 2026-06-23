@@ -10,6 +10,7 @@ import { resolveExportDir } from "../shared/exportPaths.js";
 import { assertSafeExportBasename } from "../shared/safeExportName.js";
 import {
   asRoots,
+  componentInventory,
   findNodeById,
   limitDepth,
   outline,
@@ -25,7 +26,7 @@ import {
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.6.0" },
+  { name: "mcp-bridge-figma", version: "0.7.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -160,7 +161,7 @@ server.registerTool(
           {
             phase1: "Per-node scene graph: bbox (space=absolute|relative) + `rel` (parent-relative box), fills/strokes (`cssColor` #hex/rgba, gradients incl. ready `cssGradient`), and a consolidated per-node `css` block (background/border/borderRadius/boxShadow/filter/opacity + absolute position when not an auto-layout child). Containers also have `layout`+`layout.css` (flexbox); children have `layoutSelf` (FILL/HUG/FIXED). Vector `geometry.fillGeometry` (SVG paths), isMask, corner radii, stroke dash/cap/join.",
             phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor, plus `byMode` [{mode,value,cssColor}] for multi-mode collections e.g. light/dark) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight + CSS-ready cssLineHeight/cssLetterSpacing/cssTextTransform/cssTextDecoration; effect detail; style IDs.",
-            phase3: "Adds component/variant/instance metadata, mainComponent refs, optional PNG raster (base64) for small nodes when enabled in plugin.",
+            phase3: "Adds component/variant/instance metadata, mainComponent refs (group repeated instances with figma_bridge_list_components), optional PNG raster (base64) for small nodes when enabled in plugin.",
             notes: "Pass name:\"latest\" to any read tool to target the newest export. Each node has a ready `css` block + cssColor/cssGradient — apply them directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, figma_bridge_get_raster returns an MCP image block (the agent can SEE it) keyed by node id or imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
@@ -344,6 +345,35 @@ server.registerTool(
       return { ...jsonText({ error: "node_not_found", nodeId }), isError: true };
     }
     return { content: [{ type: "text" as const, text: codegenNode(node, depth) }] };
+  },
+);
+
+server.registerTool(
+  "figma_bridge_list_components",
+  {
+    description:
+      'Inventory of components used in an export: groups INSTANCE nodes by their main component → [{id,name,key,remote,count,instanceIds}] sorted by usage. Use to recognize repeated components ("Button x14") and build a reusable library instead of duplicated markup. Requires phase 3. Accepts name:"latest".',
+    inputSchema: z.object({
+      name: z
+        .string()
+        .min(5)
+        .describe('Export basename ending in .json, or "latest"'),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(50_000_000)
+        .optional()
+        .default(20_000_000),
+    }),
+  },
+  async ({ name, maxBytes }) => {
+    const res = await loadExport(name, maxBytes);
+    if (!res.ok) {
+      return { ...jsonText(res.error), isError: true };
+    }
+    const components = componentInventory(asRoots(res.data.roots));
+    return jsonText({ count: components.length, components });
   },
 );
 
