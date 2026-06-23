@@ -23,3 +23,19 @@ export function exportFilenamePrefix(meta: {
   }
   return "export";
 }
+
+/**
+ * Filename prefix combining the document identity with the top selected frame
+ * name (when present), so exports read like `MyFile_LoginScreen_<stamp>.json`
+ * and an agent/user can tell which screen each file holds.
+ */
+export function exportPrefix(
+  meta: { fileKey?: string | null; fileName?: string },
+  firstRootName?: string,
+): string {
+  const base = exportFilenamePrefix(meta);
+  if (firstRootName != null && String(firstRootName).trim() !== "") {
+    return `${base}_${slugFileKey(String(firstRootName))}`;
+  }
+  return base;
+}

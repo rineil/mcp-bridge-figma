@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { slugFileKey, exportFilenamePrefix } from "../src/shared/exportNaming";
+import {
+  slugFileKey,
+  exportFilenamePrefix,
+  exportPrefix,
+} from "../src/shared/exportNaming";
 
 describe("slugFileKey", () => {
   it("collapses unsafe chars and prevents path traversal", () => {
@@ -32,5 +36,17 @@ describe("exportFilenamePrefix", () => {
   });
   it("defaults to 'export' when nothing usable", () => {
     expect(exportFilenamePrefix({})).toBe("export");
+  });
+});
+
+describe("exportPrefix", () => {
+  it("appends the slugged first root name", () => {
+    expect(exportPrefix({ fileName: "My Design" }, "Login Screen")).toBe(
+      "My_Design_Login_Screen",
+    );
+  });
+  it("falls back to the file prefix without a root name", () => {
+    expect(exportPrefix({ fileKey: "abc" })).toBe("abc");
+    expect(exportPrefix({ fileName: "X" }, "  ")).toBe("X");
   });
 });

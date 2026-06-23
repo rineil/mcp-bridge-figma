@@ -17,7 +17,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { resolveExportDir } from "../shared/exportPaths.js";
-import { exportFilenamePrefix } from "../shared/exportNaming.js";
+import { exportPrefix } from "../shared/exportNaming.js";
 
 const PORT = Number(process.env.BRIDGE_PORT ?? "3845");
 const HOST = process.env.BRIDGE_HOST ?? "localhost";
@@ -111,8 +111,11 @@ async function handleExport(
 ): Promise<{ path: string; bytes: number }> {
   const data = JSON.parse(body) as {
     meta?: { fileKey?: string | null; fileName?: string };
+    roots?: Array<{ name?: unknown }>;
   };
-  const prefix = exportFilenamePrefix(data.meta ?? {});
+  const firstRootName =
+    typeof data.roots?.[0]?.name === "string" ? data.roots[0].name : undefined;
+  const prefix = exportPrefix(data.meta ?? {}, firstRootName);
   // Server-side timestamp — do NOT trust client meta.exportedAt for the filename.
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   await mkdir(exportDir, { recursive: true });
@@ -124,6 +127,9 @@ async function handleExport(
     const full = join(exportDir, name);
     try {
       await writeFile(full, body, { encoding: "utf8", flag: "wx" });
+      // Pointer to the newest export so MCP tools can resolve name:"latest".
+      // Not a .json file, so it never appears in list_exports.
+      await writeFile(join(exportDir, "_latest.txt"), name, "utf8");
       return { path: full, bytes };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EEXIST") {

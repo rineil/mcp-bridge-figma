@@ -13,6 +13,7 @@
     "bridge": "tsx src/bridge/server.ts",
     "mcp": "tsx src/mcp/server.ts",
     "mcp:dist": "node dist-mcp/server.js",
+    "print-mcp-config": "node scripts/print-mcp-config.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:plugin": "tsc -p tsconfig.plugin.json",
     "test": "vitest run",

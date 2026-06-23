@@ -15,11 +15,12 @@ import {
   outline,
   searchNodes,
 } from "../shared/exportNodes.js";
+import { sniffImageMime } from "../shared/raster.js";
 
 const exportDir = resolveExportDir();
 
 const server = new McpServer(
-  { name: "mcp-bridge-figma", version: "0.3.0" },
+  { name: "mcp-bridge-figma", version: "0.4.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -27,9 +28,21 @@ type LoadResult =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; error: Record<string, unknown> };
 
+/** Resolve the special name "latest" to the newest export via the bridge pointer. */
+async function resolveBasename(name: string): Promise<string> {
+  if (name !== "latest") {
+    return name;
+  }
+  const ptr = (await readFile(join(exportDir, "_latest.txt"), "utf8")).trim();
+  if (!ptr) {
+    throw new Error("no latest export yet — export something first");
+  }
+  return ptr;
+}
+
 /** Read + parse an export JSON by basename, guarding path, size, and JSON validity. */
 async function loadExport(name: string, maxBytes: number): Promise<LoadResult> {
-  const safe = assertSafeExportBasename(name);
+  const safe = assertSafeExportBasename(await resolveBasename(name));
   const full = join(exportDir, safe);
   const buf = await readFile(full);
   if (buf.length > maxBytes) {
@@ -92,14 +105,14 @@ server.registerTool(
   "figma_bridge_read_export",
   {
     description:
-      "Read one export JSON by basename (e.g. myfile_2026-04-12T12-00-00-000Z.json). Path must stay under the export directory.",
+      'Read one export JSON by basename (e.g. myfile_2026-04-12T12-00-00-000Z.json), or "latest" for the newest. Path must stay under the export directory.',
     inputSchema: z.object({
-      name: z.string().min(5).describe("Basename ending in .json"),
+      name: z.string().min(5).describe('Basename ending in .json, or "latest"'),
       maxBytes: z.number().int().positive().max(20_000_000).optional().default(4_000_000),
     }),
   },
   async ({ name, maxBytes }) => {
-    const safe = assertSafeExportBasename(name);
+    const safe = assertSafeExportBasename(await resolveBasename(name));
     const full = join(exportDir, safe);
     const buf = await readFile(full);
     if (buf.length > maxBytes) {
@@ -143,7 +156,7 @@ server.registerTool(
             phase1: "Per-node scene graph: bbox (space=absolute|relative) + `rel` (parent-relative box), fills/strokes (`cssColor` #hex/rgba, gradients incl. ready `cssGradient`), and a consolidated per-node `css` block (background/border/borderRadius/boxShadow/filter/opacity + absolute position when not an auto-layout child). Containers also have `layout`+`layout.css` (flexbox); children have `layoutSelf` (FILL/HUG/FIXED). Vector `geometry.fillGeometry` (SVG paths), isMask, corner radii, stroke dash/cap/join.",
             phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight + CSS-ready cssLineHeight/cssLetterSpacing/cssTextTransform/cssTextDecoration; effect detail; style IDs.",
             phase3: "Adds component/variant/instance metadata, mainComponent refs, optional PNG raster (base64) for small nodes when enabled in plugin.",
-            notes: "Colors are pre-resolved to cssColor — use those directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, fetch its bytes via figma_bridge_get_raster keyed by the imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
+            notes: "Pass name:\"latest\" to any read tool to target the newest export. Each node has a ready `css` block + cssColor/cssGradient — apply them directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, figma_bridge_get_raster returns an MCP image block (the agent can SEE it) keyed by node id or imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
           null,
@@ -158,9 +171,9 @@ server.registerTool(
   "figma_bridge_export_outline",
   {
     description:
-      "Cheap tree-of-contents for an export: meta + pruned node tree (id/name/type/bbox/childCount) with NO fills/effects/text/variables/rasters. Use FIRST to navigate large exports, then read detail with figma_bridge_read_node.",
+      'Cheap tree-of-contents for an export: meta + pruned node tree (id/name/type/bbox/childCount) with NO fills/effects/text/variables/rasters. Use FIRST to navigate large exports, then read detail with figma_bridge_read_node. Pass name:"latest" for the newest export.',
     inputSchema: z.object({
-      name: z.string().min(5).describe("Export basename ending in .json"),
+      name: z.string().min(5).describe('Export basename ending in .json, or "latest"'),
       maxDepth: z.number().int().min(0).max(50).optional().default(4),
       maxBytes: z
         .number()
@@ -283,7 +296,15 @@ server.registerTool(
         isError: true,
       };
     }
-    return jsonText({ key, base64: b64 });
+    // Return an MCP image block so a multimodal agent can actually SEE the node,
+    // plus a small text block with the key + sniffed MIME type.
+    const mimeType = sniffImageMime(b64);
+    return {
+      content: [
+        { type: "text" as const, text: JSON.stringify({ key, mimeType }) },
+        { type: "image" as const, data: b64, mimeType },
+      ],
+    };
   },
 );
 
