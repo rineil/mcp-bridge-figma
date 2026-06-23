@@ -8,6 +8,7 @@ import {
   findNodeById,
   limitDepth,
   searchNodes,
+  componentInventory,
 } from "../src/shared/exportNodes";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,5 +69,31 @@ describe("searchNodes", () => {
   });
   it("honors the limit", () => {
     expect(searchNodes(roots, "", 1)).toHaveLength(1);
+  });
+});
+
+describe("componentInventory", () => {
+  const tree = [
+    {
+      id: "0:1",
+      type: "FRAME",
+      name: "Page",
+      children: [
+        { id: "1:1", type: "INSTANCE", name: "Button", component: { mainComponent: { id: "C:1", name: "Button", remote: false } } },
+        { id: "1:2", type: "INSTANCE", name: "Button", component: { mainComponent: { id: "C:1", name: "Button", remote: false } } },
+        { id: "1:3", type: "INSTANCE", name: "Card", component: { mainComponent: { id: "C:2", name: "Card", remote: true } } },
+        { id: "1:4", type: "RECTANGLE", name: "Plain" },
+      ],
+    },
+  ];
+  it("groups instances by main component, sorted by usage", () => {
+    const inv = componentInventory(asRoots(tree));
+    expect(inv).toHaveLength(2);
+    expect(inv[0]).toMatchObject({ id: "C:1", name: "Button", count: 2 });
+    expect(inv[0].instanceIds).toEqual(["1:1", "1:2"]);
+    expect(inv[1]).toMatchObject({ id: "C:2", name: "Card", remote: true, count: 1 });
+  });
+  it("returns empty when there are no instances", () => {
+    expect(componentInventory(asRoots([{ id: "x", type: "FRAME" }]))).toEqual([]);
   });
 });
