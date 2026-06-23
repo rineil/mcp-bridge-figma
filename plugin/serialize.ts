@@ -1,12 +1,22 @@
 /// <reference types="@figma/plugin-typings" />
 
-import { collectImageHashes, cssColor, resolveTokens } from "./pure";
+import {
+  buildNodeCss,
+  collectImageHashes,
+  cssColor,
+  cssGradient,
+  cssLetterSpacing,
+  cssLineHeight,
+  cssTextDecoration,
+  cssTextTransform,
+  resolveTokens,
+} from "./pure";
 
 export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.5.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 8000;
 const TEXT_CAP = 8000;
@@ -76,9 +86,18 @@ function serializeBoundVars(bv: {
   return o;
 }
 
+function nodeDims(node: object): { width: number; height: number } {
+  const n = node as Record<string, unknown>;
+  return {
+    width: typeof n.width === "number" ? n.width : 1,
+    height: typeof n.height === "number" ? n.height : 1,
+  };
+}
+
 function serializePaint(
   paint: Paint,
   phase: ExportPhase,
+  dims?: { width: number; height: number },
 ): Record<string, unknown> {
   const o: Record<string, unknown> = {
     type: paint.type,
@@ -108,6 +127,10 @@ function serializePaint(
         cssColor: cssColor(s.color),
       })) ?? [];
     o.gradientTransform = paint.gradientTransform;
+    const grad = cssGradient(o, dims?.width, dims?.height);
+    if (grad) {
+      o.cssGradient = grad;
+    }
     if (phase >= 2 && "boundVariables" in paint && paint.boundVariables) {
       o.boundVariables = JSON.parse(
         JSON.stringify(paint.boundVariables),
@@ -128,7 +151,8 @@ function serializeFills(
     return [];
   }
   const fills = node.fills as readonly Paint[];
-  return fills.map((p) => serializePaint(p, phase));
+  const dims = nodeDims(node);
+  return fills.map((p) => serializePaint(p, phase, dims));
 }
 
 function serializeStrokes(
@@ -139,7 +163,8 @@ function serializeStrokes(
     return [];
   }
   const strokes = node.strokes as readonly Paint[];
-  return strokes.map((p) => serializePaint(p, phase));
+  const dims = nodeDims(node);
+  return strokes.map((p) => serializePaint(p, phase, dims));
 }
 
 /** Map Figma auto-layout onto a ready-to-use flexbox style block. */
@@ -312,6 +337,10 @@ function styledTextSegments(node: TextNode): unknown[] {
       textDecoration: s.textDecoration,
       lineHeight: s.lineHeight,
       letterSpacing: s.letterSpacing,
+      cssLineHeight: cssLineHeight(s.lineHeight),
+      cssLetterSpacing: cssLetterSpacing(s.letterSpacing),
+      cssTextTransform: cssTextTransform(s.textCase),
+      cssTextDecoration: cssTextDecoration(s.textDecoration),
       fills: s.fills,
       textStyleId: s.textStyleId,
       fillStyleId: s.fillStyleId,
@@ -349,6 +378,23 @@ function textExtras(
       node.textStyleId === figma.mixed ? "mixed" : node.textStyleId;
     o.fontWeight = node.fontWeight === figma.mixed ? "mixed" : node.fontWeight;
     o.segments = styledTextSegments(node);
+    // CSS-ready conversions of the (non-mixed) node-level text props.
+    const clh = cssLineHeight(o.lineHeight);
+    if (clh) {
+      o.cssLineHeight = clh;
+    }
+    const cls = cssLetterSpacing(o.letterSpacing);
+    if (cls) {
+      o.cssLetterSpacing = cls;
+    }
+    const ctt = cssTextTransform(o.textCase);
+    if (ctt) {
+      o.cssTextTransform = ctt;
+    }
+    const ctd = cssTextDecoration(o.textDecoration);
+    if (ctd) {
+      o.cssTextDecoration = ctd;
+    }
   }
   return o;
 }
@@ -619,6 +665,18 @@ export async function serializeNode(
   const vec = vectorGeometry(node);
   if (vec) {
     base.geometry = vec;
+  }
+
+  // Consolidated, ready-to-apply CSS block. Absolute positioning only when the
+  // node is NOT a child of an auto-layout frame (otherwise flex handles it).
+  const cssParent = node.parent;
+  const parentIsAuto =
+    !!cssParent &&
+    "layoutMode" in cssParent &&
+    (cssParent as BaseFrameMixin).layoutMode !== "NONE";
+  const nodeCss = buildNodeCss(base, { absolute: !parentIsAuto });
+  if (nodeCss) {
+    base.css = nodeCss;
   }
 
   const kids = getChildren(node);
