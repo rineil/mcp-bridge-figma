@@ -323,7 +323,7 @@ const html = `
 </style>
 <span id="pill" class="pill"><span class="dot"></span><span id="pillText">Chưa kiểm tra</span></span>
 <label>Bridge URL</label>
-<input id="url" value="http://localhost:3845" />
+<input id="url" value="http://localhost:3846" />
 <label>Bridge token</label>
 <input id="token" placeholder="dán token in ở terminal" />
 <div class="hint">Lấy từ dòng "[figma-bridge] token: …" khi chạy pnpm bridge (lưu lại tự động)</div>
@@ -464,7 +464,7 @@ void (async () => {
   const includeRaster = (await get("includeRaster")) as boolean | undefined;
   figma.ui.postMessage({
     type: "init",
-    bridgeUrl: typeof url === "string" && url ? url : "http://localhost:3845",
+    bridgeUrl: typeof url === "string" && url ? url : "http://localhost:3846",
     token: typeof token === "string" ? token : "",
     phase: typeof phase === "number" ? phase : 2,
     scope: scope === "page" ? "page" : "selection",
