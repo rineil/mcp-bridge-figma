@@ -535,6 +535,11 @@ export function resolveTokens(
           referenced.add(ref);
           const v = varsById.get(ref);
           const r = resolveVar(ref, varsById, colsById);
+          // Deliberately NOT compacted to a bare {id,name}: a paint bound to an
+          // alias may carry no colour of its own (cssColor here is the only
+          // resolved value), non-colour variables live in `value` alone, and
+          // remote library variables never reach the top-level table at all.
+          // Trimming this saved ~5% of a real export and risked silent loss.
           tokens[field] = {
             id: ref,
             name: v?.name,
@@ -646,4 +651,70 @@ export function collectImageHashes(roots: unknown[]): string[] {
     visit(r);
   }
   return [...out];
+}
+
+/**
+ * Scale for a visual-reference PNG render. Fits the node inside `maxPx` on BOTH
+ * axes — bounding width alone lets a very tall frame through — and never
+ * upscales past `maxScale`, since extra pixels beyond that only cost bytes.
+ * Returns 0 for a degenerate box so callers can skip instead of exporting junk.
+ */
+export function fitPreviewScale(
+  width: number,
+  height: number,
+  maxPx: number,
+  maxScale: number,
+): number {
+  if (!(width > 0) || !(height > 0)) {
+    return 0;
+  }
+  return Math.min(maxPx / width, maxPx / height, maxScale);
+}
+
+/** FNV-1a over a string -> 8 hex chars. No crypto in the Figma sandbox. */
+export function hashString(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    // 32-bit FNV prime multiply, kept in range without BigInt.
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/**
+ * Key order must not change a hash, or an unrelated serializer tweak would look
+ * like a design edit. Sorts object keys; arrays keep order (it is meaningful for
+ * children and paints).
+ */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  const o = value as Record<string, unknown>;
+  const keys = Object.keys(o).sort();
+  return `{${keys
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`)
+    .join(",")}}`;
+}
+
+/**
+ * Merkle-hash a serialized node tree in place: every node gets `hash` covering
+ * its own fields plus its children's hashes, so a deep edit changes the hash of
+ * that node AND of each ancestor. That is what lets a diff walk from the root
+ * straight to what actually moved, instead of re-reading the whole export.
+ * `hash` and `children` are excluded from a node's own digest.
+ */
+export function attachHashes(node: Record<string, unknown>): string {
+  const kids = Array.isArray(node.children)
+    ? (node.children as Record<string, unknown>[])
+    : [];
+  const childHashes = kids.map((c) => attachHashes(c));
+  const { hash: _ignored, children: _kids, ...own } = node;
+  const h = hashString(stableStringify(own) + childHashes.join(""));
+  node.hash = h;
+  return h;
 }

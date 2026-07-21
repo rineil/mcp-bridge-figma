@@ -7,7 +7,55 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Chưa có thay đổi chưa phát hành._
+Vòng lặp "sinh code rồi tự kiểm chứng": ảnh render để agent **nhìn** được thiết kế,
+hash để biết design đã đổi ở **đâu**, và cắt bớt payload trùng lặp. Plugin `0.8.0`.
+
+### Added
+
+- **Ảnh render từng màn (phase 3 + raster)**: trước đây chỉ render node
+  `≤ 400×400` nên **không màn hình thật nào** lọt qua. Nay fit theo **cả hai
+  chiều** về `MAX_PREVIEW_PX` (1600), cho up-scale ≤ 2× với node nhỏ, tự hạ scale
+  và thử lại khi PNG vượt trần. Container SECTION/GROUP được render theo **từng
+  frame con** (1 ảnh/màn) thay vì một ảnh khổng lồ. Lấy qua
+  `figma_bridge_get_raster` — trả về image block nên agent **nhìn thấy** để đối
+  chiếu với code nó vừa sinh.
+- **`meta.rasterReport`**: `previews[]` (id/name/kích thước/bytes), `imageCount`,
+  và `skipped[{key,name,reason}]`. Trước đây ảnh vượt trần bị bỏ **âm thầm**,
+  khiến "quá cỡ" trông y hệt "thiết kế không có ảnh".
+- **Hash Merkle mỗi node** + `meta.contentHash` / `meta.rootHashes`. Hash của một
+  node phủ cả cây con, nên sửa sâu làm đổi hash node đó **và mọi tổ tiên**, trong
+  khi nhánh không đổi giữ nguyên hash.
+- **Tool `figma_bridge_diff_exports`**: so hai export, trả
+  `[{id,name,type,change}]`. Bỏ qua nguyên nhánh có hash trùng và chỉ báo node
+  **thực sự** bị sửa (không kể tổ tiên bị đổi hash lây). Không tham số thì so
+  export liền trước với `latest`. Export cũ chưa có hash vẫn diff được
+  (`hashed:false`).
+
+### Changed
+
+- **Trần ảnh nhúng** `512KB` → `4MB` (base64 phồng ~33%, tối đa 12 ảnh nên vẫn
+  nằm trong trần body 64MB của bridge). Ảnh hero cỡ thật trước đây luôn bị loại.
+- **`DEFAULT_MAX_NODES`** `8000` → `20000`; một màn 8261 node từng bị cắt mất 6 node.
+- **Payload gọn hơn ~22%** (đo trên export thật 11.69 MB), không mất dữ liệu:
+  - `text.segments` chỉ xuất khi có **>1 run** hoặc có hyperlink. 3129/3131 node
+    text chỉ có đúng 1 run lặp lại y nguyên các trường cấp node (đã đối chiếu
+    từng trường: 0 sai khác; `segment.fills` là bản nghèo hơn của `node.fills`,
+    vốn đã có `cssColor` + `tokens`). Tiết kiệm ~1.9 MB.
+  - `layoutSelf` bỏ giá trị mặc định của Figma: `constraints` MIN/MIN,
+    `layoutAlign` INHERIT, `layoutGrow` 0. Đọc thiếu khoá = mặc định. ~0.66 MB.
+
+### Fixed
+
+- Nhãn checkbox raster ghi "tối đa 5 layer gốc" trong khi trần thật là 8 màn +
+  12 ảnh nhúng.
+
+### Notes
+
+- **Không** nén `tokens` nhúng trong paint (0.77 MB, lặp ~96 lần/token) dù rất
+  cám dỗ: 5/46 token là biến thư viện **remote** không có trong bảng `variables`,
+  paint bind qua **alias** có thể không mang màu riêng (`tokens.cssColor` là nơi
+  duy nhất có màu đã resolve), và biến non-color chỉ có giá trị trong `value`.
+  Đổi ~5% dung lượng lấy nguy cơ mất dữ liệu âm thầm là không đáng.
 
 ## [0.7.0] - 2026-06-23
 
