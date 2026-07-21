@@ -100,6 +100,11 @@ figma.ui.onmessage = async (msg: UiMessage) => {
       typeof meta.omittedCount === "number" ? meta.omittedCount : 0;
     const nodes = typeof meta.nodeCount === "number" ? meta.nodeCount : 0;
     const maxNodes = typeof meta.maxNodes === "number" ? meta.maxNodes : 0;
+    const rr = (meta.rasterReport ?? {}) as {
+      previews?: unknown[];
+      imageCount?: number;
+      skipped?: unknown[];
+    };
     const summary = res.ok
       ? {
           basename: saved.split("/").pop() ?? "",
@@ -110,6 +115,9 @@ figma.ui.onmessage = async (msg: UiMessage) => {
           scope: msg.scope,
           bytes: typeof reply.bytes === "number" ? reply.bytes : 0,
           truncated: omitted > 0 || (maxNodes > 0 && nodes >= maxNodes),
+          previews: Array.isArray(rr.previews) ? rr.previews.length : 0,
+          images: typeof rr.imageCount === "number" ? rr.imageCount : 0,
+          rasterSkipped: Array.isArray(rr.skipped) ? rr.skipped.length : 0,
         }
       : undefined;
 
@@ -183,7 +191,7 @@ const html = `
 </select>
 <div class="row">
   <input type="checkbox" id="raster" style="width:auto;margin:0" />
-  <label for="raster" style="margin:0;font-weight:500">PNG preview (phase 3, tối đa 5 layer gốc)</label>
+  <label for="raster" style="margin:0;font-weight:500">PNG preview (phase 3, tối đa 8 màn + 12 ảnh nhúng)</label>
 </div>
 <button id="run">Export → bridge</button>
 <div class="log" id="log"></div>
@@ -240,9 +248,16 @@ const html = `
         const s = m.summary;
         let html = '<span class="ok">✓ Đã export</span> · <code>' + s.basename + '</code>'
           + '<br>' + s.nodes + ' node · ' + fmtKB(s.bytes) + ' · phase ' + s.phase + ' · ' + s.scope;
+        if (s.previews || s.images) {
+          html += '<br>🖼 ' + s.previews + ' ảnh màn hình · ' + s.images + ' ảnh nhúng';
+        }
         if (s.truncated) {
           html += '<span class="warn">⚠ Bị cắt bớt: ' + s.omitted + ' node bị bỏ (chạm maxNodes/maxDepth). '
             + 'Thu hẹp selection hoặc tăng giới hạn để đủ dữ liệu.</span>';
+        }
+        if (s.rasterSkipped) {
+          html += '<span class="warn">⚠ ' + s.rasterSkipped + ' ảnh bị bỏ qua — xem meta.rasterReport.skipped '
+            + 'trong file JSON để biết lý do.</span>';
         }
         log.innerHTML = html;
       } else {

@@ -95,7 +95,7 @@ Tiện ích trong plugin: **đèn trạng thái + nút "Kiểm tra kết nối"*
 |-------|----------|--------------|
 | **1** | Cây node + hình học: bbox/rel, fills/strokes (kèm `cssColor`), auto-layout (+ `layout.css` flexbox) & sizing per-node, vector path (icon→SVG), mask, bo góc, nét đứt | Dựng layout nhanh, file nhẹ |
 | **2** | + Bảng **design tokens** đã resolve (`variables` gọn + `tokens` tại paint), text per-segment + `fontWeight`, chi tiết effect | Dựng đúng màu/spacing theo token (khuyên dùng) |
-| **3** | + Metadata component/variant/instance, + tuỳ chọn **raster PNG** + byte ảnh (`getImageByHash`) | Cần component & ảnh thật |
+| **3** | + Metadata component/variant/instance, + tuỳ chọn **raster**: PNG render **từng màn** (để AI nhìn & đối chiếu code) + byte ảnh nhúng (`getImageByHash`) | Cần component, ảnh thật & kiểm chứng bằng mắt |
 
 `Scope`: **Selection** (các layer đang chọn) hoặc **Toàn bộ page**.
 
@@ -146,6 +146,7 @@ Ký tự đầu phải là `{` (không được xuống dòng hay `>` trước �
 | `figma_bridge_codegen` | Sinh **khung JSX** cho 1 node (`framework`: `react-inline` `style={{}}` hoặc `react-tailwind` `className`); gộp `css`/`layout.css`; text→`<span>`, vector→`<svg>`, ảnh→`<img data-raster>` — scaffold để lặp |
 | `figma_bridge_list_components` | **Inventory component** (phase 3): gom INSTANCE theo main component → `[{id,name,count,instanceIds,hasDefinition}]` để nhận diện component lặp ("Button ×14") |
 | `figma_bridge_read_component` | Đọc **định nghĩa** component theo id (registry phase 3, component **local**) — bản canonical; instance mang `component.overrides` cho phần khác biệt |
+| `figma_bridge_diff_exports` | So **hai export** → `[{id,name,type,change}]`: design đã đổi ở **đâu** kể từ lần sinh code. Bỏ qua nhánh có hash trùng; không tham số thì so export liền trước với `latest` |
 | `figma_bridge_read_export` | Đọc **nguyên** một file (fallback cho file nhỏ) |
 | `figma_bridge_export_schema_hint` | Mô tả nhanh các phase + gợi ý schema |
 
@@ -164,6 +165,20 @@ Gợi ý prompt cho AGENT để dựng UI hiệu quả mà không nổ context:
    - Màu/spacing là token? Đọc `tokens` ngay tại paint hoặc bảng `variables` (đã resolve) để đặt tên biến/Tailwind theme thay vì hard-code.
 
 > Luồng khuyến nghị cho file lớn: `export_outline` → `search_nodes` → `read_node` (thay vì `read_export` đọc cả file).
+
+### Tự kiểm chứng code vừa sinh (phase 3 + raster)
+
+JSON cho biết **giá trị là gì**; ảnh render cho biết **trông phải ra sao**. Sau khi sinh code:
+
+1. Đọc `meta.rasterReport.previews` → danh sách `{id,name,width,height}`, mỗi màn một ảnh.
+2. `figma_bridge_get_raster` với `key` = preview id → trả về **image block**, agent **nhìn thấy** thiết kế thật.
+3. So với output của mình rồi sửa chỗ lệch.
+
+`meta.rasterReport.skipped` giải thích ảnh nào không kèm được và **vì sao**, nên "thiếu ảnh" không bao giờ bị hiểu nhầm thành "thiết kế không có ảnh".
+
+### Biết design đã đổi ở đâu
+
+Mỗi node có `hash` phủ **cả cây con** (Merkle), cộng `meta.contentHash`. Sau khi design cập nhật và export lại, gọi **`figma_bridge_diff_exports`** (không cần tham số) → chỉ ra đúng những node bị thêm/xoá/sửa, thay vì phải đọc lại cả file để dò. Nhánh có hash trùng bị bỏ qua nguyên khối.
 
 ## Schema JSON
 

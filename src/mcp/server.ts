@@ -11,6 +11,7 @@ import { assertSafeExportBasename } from "../shared/safeExportName.js";
 import {
   asRoots,
   componentInventory,
+  diffTrees,
   findNodeById,
   limitDepth,
   outline,
@@ -31,7 +32,9 @@ const server = new McpServer(
 );
 
 type LoadResult =
-  | { ok: true; data: Record<string, unknown> }
+  // `name` is the resolved basename, so callers that passed "latest" can report
+  // which file they actually read.
+  | { ok: true; name: string; data: Record<string, unknown> }
   | { ok: false; error: Record<string, unknown> };
 
 /** Resolve the special name "latest" to the newest export via the bridge pointer. */
@@ -65,6 +68,7 @@ async function loadExport(name: string, maxBytes: number): Promise<LoadResult> {
   try {
     return {
       ok: true,
+      name: safe,
       data: JSON.parse(buf.toString("utf8")) as Record<string, unknown>,
     };
   } catch (e) {
@@ -104,6 +108,84 @@ server.registerTool(
     const slice = names.slice(0, limit);
     const text = JSON.stringify({ exportDir, files: slice }, null, 2);
     return { content: [{ type: "text", text }] };
+  },
+);
+
+server.registerTool(
+  "figma_bridge_diff_exports",
+  {
+    description:
+      'Compare two exports of the same screen and list what changed: [{id,name,type,change:"added"|"removed"|"modified"}]. Use after the design was re-exported to find exactly which nodes moved since you generated code, instead of re-reading the whole file. Compares per-node `hash` (each covers its subtree), so unchanged branches are skipped. `before` defaults to the second-newest export, `after` to "latest".',
+    inputSchema: z.object({
+      before: z
+        .string()
+        .min(5)
+        .optional()
+        .describe('Older export basename, or "latest"'),
+      after: z
+        .string()
+        .min(5)
+        .optional()
+        .describe('Newer export basename, or "latest" (default)'),
+      limit: z.number().int().positive().max(500).optional().default(100),
+      maxBytes: z.number().int().positive().optional().default(20_000_000),
+    }),
+  },
+  async ({ before, after, limit, maxBytes }) => {
+    let older = before;
+    if (!older) {
+      // Default to the previous export so "what changed?" works with no args.
+      let names: string[] = [];
+      try {
+        names = (await readdir(exportDir)).filter((n) => n.endsWith(".json"));
+      } catch {
+        names = [];
+      }
+      names.sort().reverse();
+      older = names[1];
+      if (!older) {
+        return {
+          ...jsonText({
+            error: "need_two_exports",
+            detail:
+              "Only one export is present, so there is nothing to compare against.",
+          }),
+          isError: true,
+        };
+      }
+    }
+    const a = await loadExport(older, maxBytes);
+    if (!a.ok) {
+      return { ...jsonText(a.error), isError: true };
+    }
+    const b = await loadExport(after ?? "latest", maxBytes);
+    if (!b.ok) {
+      return { ...jsonText(b.error), isError: true };
+    }
+    const aMeta = (a.data.meta ?? {}) as Record<string, unknown>;
+    const bMeta = (b.data.meta ?? {}) as Record<string, unknown>;
+    const hashed =
+      typeof aMeta.contentHash === "string" &&
+      typeof bMeta.contentHash === "string";
+    if (hashed && aMeta.contentHash === bMeta.contentHash) {
+      return jsonText({
+        before: a.name,
+        after: b.name,
+        identical: true,
+        changes: [],
+      });
+    }
+    const changes = diffTrees(asRoots(a.data.roots), asRoots(b.data.roots));
+    return jsonText({
+      before: a.name,
+      after: b.name,
+      identical: false,
+      // Exports predating per-node hashes still diff, just without subtree pruning.
+      hashed,
+      totalChanges: changes.length,
+      truncated: changes.length > limit,
+      changes: changes.slice(0, limit),
+    });
   },
 );
 
@@ -161,8 +243,9 @@ server.registerTool(
           {
             phase1: "Per-node scene graph: bbox (space=absolute|relative) + `rel` (parent-relative box), fills/strokes (`cssColor` #hex/rgba, gradients incl. ready `cssGradient`), and a consolidated per-node `css` block (background/border/borderRadius/boxShadow/filter/opacity + absolute position when not an auto-layout child). Containers also have `layout`+`layout.css` (flexbox); children have `layoutSelf` (FILL/HUG/FIXED). Vector `geometry.fillGeometry` (SVG paths), isMask, corner radii, stroke dash/cap/join.",
             phase2: "Adds a COMPACT resolved token table (variables: referenced-only, default-mode value + cssColor, plus `byMode` [{mode,value,cssColor}] for multi-mode collections e.g. light/dark) with per-paint `tokens`; text per-range styling (text.segments) + fontWeight + CSS-ready cssLineHeight/cssLetterSpacing/cssTextTransform/cssTextDecoration; effect detail; style IDs.",
-            phase3: "Adds component/variant/instance metadata + mainComponent refs + per-instance component.overrides; a top-level `components` registry of LOCAL component definitions (read via figma_bridge_read_component; group instances with figma_bridge_list_components). Optional PNG raster for small nodes when enabled in plugin.",
+            phase3: "Adds component/variant/instance metadata + mainComponent refs + per-instance component.overrides; a top-level `components` registry of LOCAL component definitions (read via figma_bridge_read_component; group instances with figma_bridge_list_components). With the plugin's raster checkbox on, also ships PNG renders of each screen plus the bytes behind IMAGE fills.",
             notes: "Pass name:\"latest\" to any read tool to target the newest export. Each node has a ready `css` block + cssColor/cssGradient — apply them directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, figma_bridge_get_raster returns an MCP image block (the agent can SEE it) keyed by node id or imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
+            verifyGeneratedUI: "When phase 3 ran with raster on, meta.rasterReport.previews lists one rendered PNG per screen ({id,name,width,height}). After generating code from the JSON, call figma_bridge_get_raster with a preview id to SEE the intended design, then compare it against your output and fix what differs — the JSON says what the values are, the render shows what it should look like. meta.rasterReport.skipped explains any image that did not ship, so an absent raster is never mistaken for a design with no images.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
           null,

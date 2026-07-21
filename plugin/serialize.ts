@@ -7,8 +7,11 @@ import {
   cssGradient,
   cssLetterSpacing,
   cssLineHeight,
+  attachHashes,
   cssTextDecoration,
   cssTextTransform,
+  fitPreviewScale,
+  hashString,
   resolveTokens,
 } from "./pure";
 
@@ -16,9 +19,19 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.7.0";
+const PLUGIN_VERSION = "0.8.0";
 const DEFAULT_MAX_DEPTH = 48;
-const DEFAULT_MAX_NODES = 8000;
+const DEFAULT_MAX_NODES = 20000;
+// Per-image ceiling for IMAGE fill bytes. Base64 inflates ~33% and up to 12
+// images ship per export, so this stays well inside the bridge's 64MB body cap.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+// Visual-reference renders: longest side of a preview PNG. 1600 keeps UI text
+// legible to a vision model while staying a few hundred KB per screen.
+const MAX_PREVIEW_PX = 1600;
+const MAX_PREVIEWS = 8;
+// Small components may be scaled up, but never past 2x — beyond that a PNG only
+// costs bytes without adding detail.
+const MAX_PREVIEW_SCALE = 2;
 const TEXT_CAP = 8000;
 
 type Counter = { n: number; omitted: number };
@@ -246,8 +259,14 @@ function layoutExtras(node: SceneNode): Record<string, unknown> | undefined {
 function layoutSelf(node: SceneNode): Record<string, unknown> | undefined {
   const o: Record<string, unknown> = {};
 
+  // Figma's own defaults are omitted rather than restated on every node: MIN/MIN
+  // constraints, INHERIT align and grow 0 accounted for ~660KB of pure noise in
+  // an 8k-node export. A reader treats an absent key as the default.
   if ("constraints" in node) {
-    o.constraints = (node as ConstraintMixin).constraints;
+    const c = (node as ConstraintMixin).constraints;
+    if (c && (c.horizontal !== "MIN" || c.vertical !== "MIN")) {
+      o.constraints = c;
+    }
   }
 
   // layoutSizing*/grow/align are only valid to read when the node participates
@@ -263,8 +282,12 @@ function layoutSelf(node: SceneNode): Record<string, unknown> | undefined {
     const ln = node as LayoutMixin;
     o.layoutSizingHorizontal = ln.layoutSizingHorizontal;
     o.layoutSizingVertical = ln.layoutSizingVertical;
-    o.layoutGrow = ln.layoutGrow;
-    o.layoutAlign = ln.layoutAlign;
+    if (ln.layoutGrow !== 0) {
+      o.layoutGrow = ln.layoutGrow;
+    }
+    if (ln.layoutAlign !== "INHERIT") {
+      o.layoutAlign = ln.layoutAlign;
+    }
   }
 
   for (const k of ["minWidth", "maxWidth", "minHeight", "maxHeight"] as const) {
@@ -307,8 +330,10 @@ function vectorGeometry(node: SceneNode): Record<string, unknown> | undefined {
   return Object.keys(o).length ? o : undefined;
 }
 
+type TextSegment = { hyperlink?: unknown; [k: string]: unknown };
+
 /** Per-range text styling so bold/colored/sized runs survive (vs. node-level "mixed"). */
-function styledTextSegments(node: TextNode): unknown[] {
+function styledTextSegments(node: TextNode): TextSegment[] {
   try {
     const segs = node.getStyledTextSegments([
       "fontName",
@@ -377,7 +402,14 @@ function textExtras(
     o.textStyleId =
       node.textStyleId === figma.mixed ? "mixed" : node.textStyleId;
     o.fontWeight = node.fontWeight === figma.mixed ? "mixed" : node.fontWeight;
-    o.segments = styledTextSegments(node);
+    // A single uniform run repeats what the node-level text fields above already
+    // say (verified field-by-field against a real 8k-node export: zero divergence,
+    // and segment.fills is the poorer twin of node.fills, which carries cssColor
+    // plus resolved tokens). Only emit runs when they actually differ.
+    const segs = styledTextSegments(node);
+    if (segs.length > 1 || segs.some((s) => s.hyperlink)) {
+      o.segments = segs;
+    }
     // CSS-ready conversions of the (non-mixed) node-level text props.
     const clh = cssLineHeight(o.lineHeight);
     if (clh) {
@@ -728,6 +760,46 @@ function collectMainComponentIds(roots: unknown[]): string[] {
   return [...ids];
 }
 
+/** A SECTION/GROUP is a container; its frame-like children are the screens. */
+function isScreenLike(n: SceneNode): boolean {
+  return (
+    n.type === "FRAME" ||
+    n.type === "COMPONENT" ||
+    n.type === "COMPONENT_SET" ||
+    n.type === "INSTANCE"
+  );
+}
+
+/**
+ * Nodes worth rendering as a visual reference. Rendering a SECTION gives one
+ * huge image of everything; rendering its frame children gives one image per
+ * screen, which is what an agent needs to diff generated UI against the design.
+ */
+function collectPreviewTargets(roots: readonly SceneNode[]): SceneNode[] {
+  const out: SceneNode[] = [];
+  for (const r of roots) {
+    if ((r.type === "SECTION" || r.type === "GROUP") && "children" in r) {
+      const kids = r.children.filter(isScreenLike);
+      if (kids.length > 0) {
+        out.push(...kids);
+        continue;
+      }
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+export type PreviewInfo = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  scale: number;
+  bytes: number;
+};
+export type RasterSkip = { key: string; name: string; reason: string };
+
 export async function buildExportPayload(opts: {
   phase: ExportPhase;
   scope: ExportScope;
@@ -752,31 +824,84 @@ export async function buildExportPayload(opts: {
   const counter: Counter = { n: 0, omitted: 0 };
   const rasters: Record<string, string> = {};
 
-  if (opts.phase >= 3 && opts.includeRaster && opts.scope === "selection") {
-    let c = 0;
-    for (const n of rootsInput) {
-      if (c >= 5) {
-        break;
+  const previews: PreviewInfo[] = [];
+  const rasterSkipped: RasterSkip[] = [];
+
+  // Visual-reference renders: one PNG per screen so an agent can SEE the design
+  // and diff it against the code it generated from the JSON. Scale is fitted to
+  // the node so a 1920x1000 screen and a 64x64 icon both come out usable.
+  if (opts.phase >= 3 && opts.includeRaster) {
+    for (const n of collectPreviewTargets(rootsInput)) {
+      if (previews.length >= MAX_PREVIEWS) {
+        rasterSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: `preview cap ${MAX_PREVIEWS} reached`,
+        });
+        continue;
       }
-      if ("exportAsync" in n && n.visible) {
-        const b = n.absoluteBoundingBox;
-        if (
-          b &&
-          b.width * b.height <= 400 * 400 &&
-          b.width >= 1 &&
-          b.height >= 1
-        ) {
-          try {
-            const bytes = await n.exportAsync({
-              format: "PNG",
-              constraint: { type: "SCALE", value: 1 },
-            });
-            rasters[n.id] = uint8ToBase64(bytes);
-            c++;
-          } catch {
-            /* raster optional */
-          }
+      if (!("exportAsync" in n) || !n.visible) {
+        rasterSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: n.visible ? "node cannot be exported" : "node is hidden",
+        });
+        continue;
+      }
+      const b = n.absoluteBoundingBox;
+      if (!b || b.width < 1 || b.height < 1) {
+        rasterSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: "no bounding box",
+        });
+        continue;
+      }
+      // Fit inside MAX_PREVIEW_PX on BOTH axes so a very tall frame cannot slip
+      // through on width alone; halve and retry when the PNG lands over budget.
+      let scale = fitPreviewScale(
+        b.width,
+        b.height,
+        MAX_PREVIEW_PX,
+        MAX_PREVIEW_SCALE,
+      );
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let bytes: Uint8Array;
+        try {
+          bytes = await n.exportAsync({
+            format: "PNG",
+            constraint: { type: "SCALE", value: scale },
+          });
+        } catch (e) {
+          rasterSkipped.push({
+            key: n.id,
+            name: n.name,
+            reason: `render failed: ${e instanceof Error ? e.message : String(e)}`,
+          });
+          break;
         }
+        if (bytes.length > MAX_IMAGE_BYTES) {
+          if (attempt === 2) {
+            rasterSkipped.push({
+              key: n.id,
+              name: n.name,
+              reason: `render still ${bytes.length} bytes at scale ${scale.toFixed(3)} (cap ${MAX_IMAGE_BYTES})`,
+            });
+            break;
+          }
+          scale = scale / 2;
+          continue;
+        }
+        rasters[n.id] = uint8ToBase64(bytes);
+        previews.push({
+          id: n.id,
+          name: n.name,
+          width: Math.round(b.width * scale),
+          height: Math.round(b.height * scale),
+          scale: Number(scale.toFixed(3)),
+          bytes: bytes.length,
+        });
+        break;
       }
     }
   }
@@ -790,8 +915,17 @@ export async function buildExportPayload(opts: {
 
   // Resolve IMAGE fill bytes so imageHash references become dereferenceable.
   // Opt-in (raster checkbox), capped count + per-image size to bound payload.
+  let imageCount = 0;
   if (opts.phase >= 3 && opts.includeRaster) {
-    const hashes = collectImageHashes(roots).slice(0, 12);
+    const allHashes = collectImageHashes(roots);
+    const hashes = allHashes.slice(0, 12);
+    for (const h of allHashes.slice(12)) {
+      rasterSkipped.push({
+        key: h,
+        name: "IMAGE fill",
+        reason: "image cap 12 reached",
+      });
+    }
     for (const h of hashes) {
       if (rasters[h]) {
         continue;
@@ -799,15 +933,30 @@ export async function buildExportPayload(opts: {
       try {
         const img = figma.getImageByHash(h);
         if (!img) {
+          rasterSkipped.push({
+            key: h,
+            name: "IMAGE fill",
+            reason: "hash not resolvable in this file",
+          });
           continue;
         }
         const bytes = await img.getBytesAsync();
-        if (bytes.length > 512 * 1024) {
+        if (bytes.length > MAX_IMAGE_BYTES) {
+          rasterSkipped.push({
+            key: h,
+            name: "IMAGE fill",
+            reason: `${bytes.length} bytes > cap ${MAX_IMAGE_BYTES}`,
+          });
           continue;
         }
         rasters[h] = uint8ToBase64(bytes);
-      } catch {
-        /* image bytes optional */
+        imageCount++;
+      } catch (e) {
+        rasterSkipped.push({
+          key: h,
+          name: "IMAGE fill",
+          reason: `read failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
       }
     }
   }
@@ -827,6 +976,17 @@ export async function buildExportPayload(opts: {
     maxNodes,
   };
 
+  // Surface what raster work actually happened. Skips used to be silent, which
+  // read as "the design has no images" when it really meant "over the cap".
+  if (opts.phase >= 3 && opts.includeRaster) {
+    meta.rasterReport = {
+      previews,
+      imageCount,
+      skipped: rasterSkipped,
+      note: "previews[].id are keys for figma_bridge_get_raster: fetch one to see the rendered design and compare it against generated code.",
+    };
+  }
+
   const payload: Record<string, unknown> = { meta, roots };
 
   if (opts.phase >= 2) {
@@ -843,6 +1003,16 @@ export async function buildExportPayload(opts: {
       payload.variables = null;
     }
   }
+
+  // Hash last, once the tree is final (tokens resolved), so `hash` describes the
+  // design as shipped. Per-node hashes let an agent that generated code from an
+  // earlier export find exactly which subtrees moved since — the whole point of
+  // knowing a design changed is knowing WHERE.
+  const rootHashes = roots.map((r) =>
+    attachHashes(r as Record<string, unknown>),
+  );
+  meta.contentHash = hashString(rootHashes.join(""));
+  meta.rootHashes = rootHashes;
 
   if (opts.phase >= 3 && Object.keys(rasters).length > 0) {
     payload.rasters = rasters;
