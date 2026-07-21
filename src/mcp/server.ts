@@ -30,6 +30,8 @@ const exportDir = resolveExportDir();
 // 3846, not 3845: Figma's own Dev Mode MCP server listens on 3845, and someone
 // reaching for this tool is exactly the person likely to have that running.
 const DEFAULT_BRIDGE_PORT = 3846;
+/** How often a server that lost the port race retries binding it. */
+const RETRY_MS = 5_000;
 
 /** Set when the embedded HTTP server could not start; live tools report it verbatim. */
 const liveState: { unavailable: string | null } = {
@@ -624,23 +626,46 @@ if (process.env.BRIDGE_EMBED !== "0") {
   );
   const token = loadOrCreateToken(exportDir);
   const bridge = createBridgeServer({ exportDir, token, maxBytes, live });
+  let announced = false;
+
   bridge.on("error", (e: NodeJS.ErrnoException) => {
     if (e.code === "EADDRINUSE") {
       // Record WHY, so a live tool fails in milliseconds with the real cause
       // instead of enqueueing into a server that never started and timing out
       // 25s later blaming a closed Figma panel.
-      liveState.unavailable = `port ${port} is already in use, so this process has no HTTP server — the live channel needs the bridge embedded here. Stop the separate bridge (or set BRIDGE_PORT) and restart the MCP server.`;
-      elog(`port ${port} already in use — not embedding; live tools disabled.`);
+      liveState.unavailable = `port ${port} is in use by another process, so the live channel has no HTTP server here. Retrying every ${RETRY_MS / 1000}s — it recovers on its own once that process exits.`;
+      if (!announced) {
+        elog(`port ${port} in use — live disabled, retrying every ${RETRY_MS / 1000}s.`);
+        announced = true;
+      }
+      // Several MCP clients each spawn this server and race for the port; the
+      // losers used to stay dead forever, so live stayed broken even after the
+      // winner exited. Keep trying instead of requiring a manual restart.
+      const t = setTimeout(tryListen, RETRY_MS);
+      t.unref?.();
     } else {
       liveState.unavailable = `embedded ingest failed: ${e.message}`;
       elog(`embedded ingest error: ${e.message}`);
     }
   });
-  bridge.listen(port, host, () => {
+
+  // Registered once, not per attempt: listen(port, host, cb) appends another
+  // 'listening' handler each call, so retrying would fire every accumulated
+  // callback on the eventual success.
+  bridge.on("listening", () => {
     liveState.unavailable = null;
+    announced = false;
     elog(`embedded ingest on http://${host}:${port}  exportDir=${exportDir}`);
     elog(`token: ${token} — paste into the plugin's "Bridge token" field.`);
   });
+
+  function tryListen(): void {
+    if (bridge.listening) {
+      return;
+    }
+    bridge.listen(port, host);
+  }
+  tryListen();
 } else {
   liveState.unavailable =
     "BRIDGE_EMBED=0, so this process has no HTTP server. The live channel requires the embedded bridge; remove BRIDGE_EMBED=0 from the MCP server env and restart.";
