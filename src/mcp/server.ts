@@ -23,8 +23,22 @@ import {
   createBridgeServer,
   loadOrCreateToken,
 } from "../shared/bridgeCore.js";
+import { LiveChannel } from "./liveHandlers.js";
 
 const exportDir = resolveExportDir();
+
+// 3846, not 3845: Figma's own Dev Mode MCP server listens on 3845, and someone
+// reaching for this tool is exactly the person likely to have that running.
+const DEFAULT_BRIDGE_PORT = 3846;
+
+/** Set when the embedded HTTP server could not start; live tools report it verbatim. */
+const liveState: { unavailable: string | null } = {
+  unavailable: "the embedded bridge has not started yet",
+};
+
+const live = new LiveChannel(exportDir, (m) =>
+  process.stderr.write(`[figma-bridge] ${m}\n`),
+);
 
 const server = new McpServer(
   { name: "mcp-bridge-figma", version: "0.9.0" },
@@ -520,32 +534,114 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "figma_bridge_live_status",
+  {
+    description:
+      "Check whether a Figma plugin panel is connected RIGHT NOW and which file/page it is on. Cheap, no round-trip to Figma. Call this before figma_bridge_live_capture so you can tell the user to open the panel instead of waiting on a timeout. `connected:false` means nobody is listening — Figma cannot be woken remotely, a human must open the plugin.",
+    inputSchema: z.object({}),
+  },
+  async () => {
+    if (liveState.unavailable) {
+      return jsonText({
+        connected: false,
+        liveChannel: "unavailable",
+        reason: liveState.unavailable,
+      });
+    }
+    return jsonText(live.status());
+  },
+);
+
+server.registerTool(
+  "figma_bridge_live_capture",
+  {
+    description:
+      "Pull a FRESH export straight from the Figma plugin panel that is open right now, with no manual export step, and save it like any other export. Returns the new basename — then read it with figma_bridge_export_outline / read_node / get_raster, or compare it to the previous one with figma_bridge_diff_exports to see what the designer changed. Prefer this over reading a stale file when the panel is connected; requires the panel to be open (check figma_bridge_live_status first). `scope:\"selection\"` captures what the designer has selected; `\"page\"` captures the whole page.",
+    inputSchema: z.object({
+      scope: z.enum(["selection", "page"]).optional().default("selection"),
+      phase: z
+        .union([z.literal(1), z.literal(2), z.literal(3)])
+        .optional()
+        .default(2)
+        .describe("1 layout, 2 +tokens/text detail, 3 +components/raster"),
+      includeRaster: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Phase 3 only: also render a PNG per screen so you can SEE the design. Slower.",
+        ),
+      fileKey: z
+        .string()
+        .optional()
+        .describe("Only act if the connected panel is on this Figma file."),
+    }),
+  },
+  async ({ scope, phase, includeRaster, fileKey }) => {
+    if (liveState.unavailable) {
+      return {
+        ...jsonText({ error: "live_unavailable", reason: liveState.unavailable }),
+        isError: true,
+      };
+    }
+    const out = await live.request(
+      includeRaster ? "screenshot" : "selection",
+      { phase, scope, includeRaster },
+      fileKey,
+    );
+    if (!out.ok) {
+      return {
+        ...jsonText({ error: out.code, message: out.message, detail: out.detail }),
+        isError: true,
+      };
+    }
+    return jsonText({
+      saved: out.basename,
+      bytes: out.bytes,
+      meta: out.meta,
+      next: 'Read it with figma_bridge_export_outline {name:"latest"}, or diff it against the previous export with figma_bridge_diff_exports.',
+    });
+  },
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-// Embed the local ingest HTTP server so `node dist-mcp/server.js` is the ONLY
-// launchable (no separate `pnpm bridge`). Opt out with BRIDGE_EMBED=0.
+// Embed the local ingest HTTP server so `node dist-mcp/server.js` is launchable
+// on its own. Opt out with BRIDGE_EMBED=0 when running `pnpm bridge` separately
+// — but note the live tools only work through the EMBEDDED server, since the
+// command queue lives in this process's memory.
 // CRITICAL: all logging goes to STDERR — stdout is the MCP JSON-RPC stream.
 if (process.env.BRIDGE_EMBED !== "0") {
   const elog = (m: string): void => {
     process.stderr.write(`[figma-bridge] ${m}\n`);
   };
-  const port = Number(process.env.BRIDGE_PORT ?? "3845");
+  const port = Number(process.env.BRIDGE_PORT ?? String(DEFAULT_BRIDGE_PORT));
   const host = process.env.BRIDGE_HOST ?? "localhost";
   const maxBytes = Number(
     process.env.BRIDGE_MAX_BYTES ?? String(64 * 1024 * 1024),
   );
   const token = loadOrCreateToken(exportDir);
-  const bridge = createBridgeServer({ exportDir, token, maxBytes });
+  const bridge = createBridgeServer({ exportDir, token, maxBytes, live });
   bridge.on("error", (e: NodeJS.ErrnoException) => {
     if (e.code === "EADDRINUSE") {
-      elog(`port ${port} already in use — a separate bridge is likely running; not embedding.`);
+      // Record WHY, so a live tool fails in milliseconds with the real cause
+      // instead of enqueueing into a server that never started and timing out
+      // 25s later blaming a closed Figma panel.
+      liveState.unavailable = `port ${port} is already in use, so this process has no HTTP server — the live channel needs the bridge embedded here. Stop the separate bridge (or set BRIDGE_PORT) and restart the MCP server.`;
+      elog(`port ${port} already in use — not embedding; live tools disabled.`);
     } else {
+      liveState.unavailable = `embedded ingest failed: ${e.message}`;
       elog(`embedded ingest error: ${e.message}`);
     }
   });
   bridge.listen(port, host, () => {
+    liveState.unavailable = null;
     elog(`embedded ingest on http://${host}:${port}  exportDir=${exportDir}`);
     elog(`token: ${token} — paste into the plugin's "Bridge token" field.`);
   });
+} else {
+  liveState.unavailable =
+    "BRIDGE_EMBED=0, so this process has no HTTP server. The live channel requires the embedded bridge; remove BRIDGE_EMBED=0 from the MCP server env and restart.";
 }

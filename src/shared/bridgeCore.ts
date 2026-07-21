@@ -46,10 +46,29 @@ export function loadOrCreateToken(exportDir: string): string {
   return tok;
 }
 
+/**
+ * Live-channel hooks. The registry and the per-request promises live in the MCP
+ * process (see src/mcp/liveHandlers.ts) because only that process has the tool
+ * calls waiting on them; this module stays pure transport and just routes to
+ * them when they are supplied.
+ */
+export type LiveHandlers = {
+  /** Small status blob folded into GET /health. */
+  describe(): unknown;
+  handlePoll(
+    req: IncomingMessage,
+    res: ServerResponse,
+    maxBytes: number,
+  ): Promise<void>;
+  handleResult(req: IncomingMessage, res: ServerResponse): Promise<void>;
+};
+
 export type BridgeOptions = {
   exportDir: string;
   token: string;
   maxBytes: number;
+  /** Omitted by the standalone bridge, which is ingest-only. */
+  live?: LiveHandlers;
 };
 
 function cors(res: ServerResponse): void {
@@ -70,7 +89,7 @@ function tokenOk(req: IncomingMessage, token: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+export function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -106,7 +125,7 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   });
 }
 
-async function handleExport(
+export async function handleExport(
   body: string,
   exportDir: string,
 ): Promise<{ path: string; bytes: number }> {
@@ -140,9 +159,18 @@ async function handleExport(
   }
 }
 
+/**
+ * Endpoints reachable without a token. Everything else is refused by default:
+ * the gate lives at the top of the router rather than inside each branch, so a
+ * new endpoint is closed unless it is deliberately listed here. An unguarded
+ * result endpoint would be a path for another local process to feed forged
+ * design data straight into a code-generating agent.
+ */
+const OPEN_ROUTES = new Set(["GET /health"]);
+
 /** Build (but do not start) the ingest HTTP server. The caller calls .listen(). */
 export function createBridgeServer(opts: BridgeOptions): Server {
-  const { exportDir, token, maxBytes } = opts;
+  const { exportDir, token, maxBytes, live } = opts;
   const onRequest = async (
     req: IncomingMessage,
     res: ServerResponse,
@@ -153,22 +181,38 @@ export function createBridgeServer(opts: BridgeOptions): Server {
       res.end();
       return;
     }
-    if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+
+    const route = `${req.method ?? ""} ${(req.url ?? "").split("?")[0]}`;
+    if (!OPEN_ROUTES.has(route) && !tokenOk(req, token)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "unauthorized: missing/invalid X-Bridge-Token",
+        }),
+      );
       return;
     }
-    if (req.method === "POST" && req.url === "/export") {
-      if (!tokenOk(req, token)) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            ok: false,
-            error: "unauthorized: missing/invalid X-Bridge-Token",
-          }),
-        );
-        return;
-      }
+
+    if (route === "GET /health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({ ok: true, live: live ? live.describe() : null }),
+      );
+      return;
+    }
+
+    if (live && route === "POST /poll") {
+      await live.handlePoll(req, res, maxBytes);
+      return;
+    }
+
+    if (live && route === "POST /result") {
+      await live.handleResult(req, res);
+      return;
+    }
+
+    if (route === "POST /export") {
       try {
         const raw = await readBody(req, maxBytes);
         const { path, bytes } = await handleExport(raw, exportDir);

@@ -7,6 +7,38 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — kênh live
+
+- **`figma_bridge_live_capture` / `figma_bridge_live_status`**: AI tự lấy dữ liệu
+  mới từ panel Figma đang mở, khỏi bấm export tay. Kết quả ghi thành file export
+  bình thường nên mọi tool đọc sẵn có dùng lại được nguyên vẹn.
+- Kênh ngược `POST /poll` + `POST /result` trên bridge **nhúng trong tiến trình
+  MCP** (hàng đợi là biến in-memory, không IPC). Máy trạng thái tách riêng ở
+  `src/shared/liveChannel.ts` để test được không cần socket.
+
+### Changed
+
+- **Cổng mặc định `3845` → `3846`.** 3845 là cổng Figma Dev Mode MCP — đụng độ là
+  trạng thái mặc định với đúng nhóm dùng tool này. Manifest whitelist cả hai.
+- **Token gate chuyển sang default-deny, đặt ở đầu router.** Trước đây `tokenOk`
+  chỉ được gọi trong nhánh `/export`, mà template gần nhất để copy lại là
+  `/health` *không* chặn — endpoint mới rất dễ vô tình để hở. `/result` hở nghĩa
+  là tiến trình lạ bơm được design giả vào agent đang sinh code.
+- `GET /health` trả thêm tóm tắt trạng thái live.
+
+### Notes — giới hạn đã biết
+
+- **Figma không chạy plugin ở nền.** Panel phải mở trong đúng file; AI không
+  đánh thức Figma được. `live_status` cho biết ngay thay vì chờ timeout.
+- Sandbox `fetch` **không huỷ được** (`FetchOptions` không có `signal`), nên vòng
+  poll dùng self-scheduling + generation counter thay cho `setInterval` +
+  AbortController.
+- Poll rỗng phải trả **200 kèm body**: `FetchResponse` không có `.body`, và
+  `json()` trên 204 rỗng sẽ ném lỗi làm chết vòng lặp ngay tick đầu.
+- **Server chưa tự xác thực với plugin.** Tiến trình chiếm cổng trước sẽ nhận
+  token và toàn bộ payload. Cần HMAC-SHA256 (sandbox không có `SubtleCrypto`) —
+  chưa làm, không nên coi là đã vá.
+
 Vòng lặp "sinh code rồi tự kiểm chứng": ảnh render để agent **nhìn** được thiết kế,
 hash để biết design đã đổi ở **đâu**, và cắt bớt payload trùng lặp. Plugin `0.8.0`.
 

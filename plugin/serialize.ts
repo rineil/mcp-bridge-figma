@@ -19,7 +19,7 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.8.0";
+export const PLUGIN_VERSION = "0.8.0";
 const DEFAULT_MAX_DEPTH = 48;
 const DEFAULT_MAX_NODES = 20000;
 // Per-image ceiling for IMAGE fill bytes. Base64 inflates ~33% and up to 12
