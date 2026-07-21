@@ -256,6 +256,45 @@ export class LiveChannel implements LiveHandlers {
     });
   }
 
+  /**
+   * Serve a live request forwarded by another MCP process. Identical to what a
+   * local tool call does — the queue and the panel do not care which process
+   * asked, only that exactly one of them owns the socket.
+   */
+  async handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(await readBody(req, 64 * 1024)) as Record<
+        string,
+        unknown
+      >;
+    } catch (e) {
+      json(res, 400, {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return;
+    }
+    if (body.op === "status") {
+      json(res, 200, { ok: true, status: this.status() });
+      return;
+    }
+    const params = (body.params ?? {}) as LiveParams;
+    const outcome = await this.request(
+      (body.op as LiveOp) ?? "selection",
+      {
+        phase: (params.phase ?? 2) as 1 | 2 | 3,
+        scope: params.scope === "page" ? "page" : "selection",
+        includeRaster: Boolean(params.includeRaster),
+      },
+      (body.expectFileKey as string | undefined) ?? undefined,
+    );
+    json(res, 200, { ok: true, outcome });
+  }
+
   async handleResult(
     req: IncomingMessage,
     res: ServerResponse,

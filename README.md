@@ -192,6 +192,8 @@ Kết quả được ghi thành **file export bình thường**, nên mọi tool
 >
 > Live chỉ hoạt động qua bridge **nhúng trong tiến trình MCP** (hàng đợi nằm trong RAM tiến trình đó). Nếu chạy `pnpm bridge` riêng và đặt `BRIDGE_EMBED=0`, live tool sẽ báo lỗi rõ ràng thay vì treo.
 >
+> **Nhiều client cùng lúc vẫn dùng được.** Mỗi client spawn một tiến trình MCP riêng nhưng chỉ một chiếm được cổng; các tiến trình còn lại **tự chuyển tiếp** yêu cầu sang tiến trình đó qua chính HTTP có token, nên bạn không phải nhớ client nào đang giữ cổng. Tiến trình thua cũng thử bind lại mỗi 5s để tự lành khi cổng được nhả.
+>
 > **Cổng mặc định đổi thành 3846** (3845 là cổng Figma Dev Mode MCP, rất dễ đụng).
 
 ### Biết design đã đổi ở đâu

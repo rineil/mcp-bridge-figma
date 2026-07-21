@@ -61,6 +61,13 @@ export type LiveHandlers = {
     maxBytes: number,
   ): Promise<void>;
   handleResult(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  /**
+   * Runs a live request on behalf of ANOTHER MCP process. Only one process can
+   * hold the port, so the others forward here instead of reporting the channel
+   * dead — otherwise live works in whichever client happened to start first,
+   * which is invisible to the user.
+   */
+  handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void>;
 };
 
 export type BridgeOptions = {
@@ -209,6 +216,11 @@ export function createBridgeServer(opts: BridgeOptions): Server {
 
     if (live && route === "POST /result") {
       await live.handleResult(req, res);
+      return;
+    }
+
+    if (live && route === "POST /live/request") {
+      await live.handleRequest(req, res);
       return;
     }
 

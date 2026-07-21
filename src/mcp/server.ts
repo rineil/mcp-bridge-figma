@@ -23,7 +23,8 @@ import {
   createBridgeServer,
   loadOrCreateToken,
 } from "../shared/bridgeCore.js";
-import { LiveChannel } from "./liveHandlers.js";
+import { LiveChannel, type LiveOutcome } from "./liveHandlers.js";
+import type { LiveOp } from "../shared/liveChannel.js";
 
 const exportDir = resolveExportDir();
 
@@ -41,6 +42,46 @@ const liveState: { unavailable: string | null } = {
 const live = new LiveChannel(exportDir, (m) =>
   process.stderr.write(`[figma-bridge] ${m}\n`),
 );
+
+const bridgeCfg = {
+  port: Number(process.env.BRIDGE_PORT ?? String(DEFAULT_BRIDGE_PORT)),
+  host: process.env.BRIDGE_HOST ?? "localhost",
+  maxBytes: Number(process.env.BRIDGE_MAX_BYTES ?? String(64 * 1024 * 1024)),
+  token: loadOrCreateToken(exportDir),
+};
+
+/**
+ * Only one process can bind the bridge port, but every MCP client spawns its
+ * own server, so the live channel would otherwise work in whichever client
+ * happened to start first — with no way for the user to tell which. The losers
+ * forward to the winner over the same token-gated HTTP the plugin uses.
+ */
+async function proxyLive(
+  op: "status" | LiveOp,
+  params?: { phase: 1 | 2 | 3; scope: "selection" | "page"; includeRaster: boolean },
+  expectFileKey?: string,
+): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
+  const url = `http://${bridgeCfg.host}:${bridgeCfg.port}/live/request`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Bridge-Token": bridgeCfg.token,
+      },
+      body: JSON.stringify({ op, params, expectFileKey }),
+      // Outlast the remote tool timeout (lease + grace) so the far side reports
+      // the precise reason instead of this end guessing.
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `bridge returned ${res.status}` };
+    }
+    return { ok: true, data: (await res.json()) as Record<string, unknown> };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 const server = new McpServer(
   { name: "mcp-bridge-figma", version: "0.9.0" },
@@ -544,14 +585,22 @@ server.registerTool(
     inputSchema: z.object({}),
   },
   async () => {
-    if (liveState.unavailable) {
+    if (!liveState.unavailable) {
+      return jsonText(live.status());
+    }
+    const proxied = await proxyLive("status");
+    if (!proxied.ok) {
       return jsonText({
         connected: false,
         liveChannel: "unavailable",
         reason: liveState.unavailable,
+        proxyError: proxied.error,
       });
     }
-    return jsonText(live.status());
+    return jsonText({
+      ...(proxied.data.status as Record<string, unknown>),
+      servedBy: "another MCP process that owns the bridge port",
+    });
   },
 );
 
@@ -581,17 +630,26 @@ server.registerTool(
     }),
   },
   async ({ scope, phase, includeRaster, fileKey }) => {
+    const op = includeRaster ? "screenshot" : "selection";
+    const params = { phase, scope, includeRaster };
+    let out: LiveOutcome;
     if (liveState.unavailable) {
-      return {
-        ...jsonText({ error: "live_unavailable", reason: liveState.unavailable }),
-        isError: true,
-      };
+      const proxied = await proxyLive(op, params, fileKey);
+      if (!proxied.ok) {
+        return {
+          ...jsonText({
+            error: "live_unavailable",
+            reason: liveState.unavailable,
+            proxyError: proxied.error,
+            hint: "No process is serving the bridge port. Make sure an MCP client is running with the embedded bridge.",
+          }),
+          isError: true,
+        };
+      }
+      out = proxied.data.outcome as LiveOutcome;
+    } else {
+      out = await live.request(op, params, fileKey);
     }
-    const out = await live.request(
-      includeRaster ? "screenshot" : "selection",
-      { phase, scope, includeRaster },
-      fileKey,
-    );
     if (!out.ok) {
       return {
         ...jsonText({ error: out.code, message: out.message, detail: out.detail }),
@@ -619,12 +677,9 @@ if (process.env.BRIDGE_EMBED !== "0") {
   const elog = (m: string): void => {
     process.stderr.write(`[figma-bridge] ${m}\n`);
   };
-  const port = Number(process.env.BRIDGE_PORT ?? String(DEFAULT_BRIDGE_PORT));
-  const host = process.env.BRIDGE_HOST ?? "localhost";
-  const maxBytes = Number(
-    process.env.BRIDGE_MAX_BYTES ?? String(64 * 1024 * 1024),
-  );
-  const token = loadOrCreateToken(exportDir);
+  // Same values the proxy path dials, so a listener and a forwarder can never
+  // disagree about where the bridge is or which token opens it.
+  const { port, host, maxBytes, token } = bridgeCfg;
   const bridge = createBridgeServer({ exportDir, token, maxBytes, live });
   let announced = false;
 
