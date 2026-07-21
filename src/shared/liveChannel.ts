@@ -188,9 +188,15 @@ export class LiveRegistry {
       }
       candidates = matching;
     }
-    // Two Figma windows both polling would drain one queue nondeterministically,
-    // answering truthfully about the wrong file. Refuse rather than guess.
-    if (candidates.length > 1) {
+    // Refusing is about answering for the WRONG document, not about the count.
+    // Reopening the panel (or Figma running in both the app and a browser tab)
+    // leaves several sessions on the same file and page, where any of them
+    // gives the same answer — treat that as one and take the freshest. Only a
+    // genuine split across documents is ambiguous.
+    const identity = (s: LiveSession): string =>
+      `${s.fileKey ?? s.fileName}::${s.pageId}`;
+    const distinct = new Set(candidates.map(identity));
+    if (distinct.size > 1) {
       return {
         ok: false,
         code: "ambiguous_session",
@@ -203,6 +209,9 @@ export class LiveRegistry {
         },
       };
     }
+    candidates = [
+      candidates.reduce((a, b) => (b.lastPollAt > a.lastPollAt ? b : a)),
+    ];
     if (this.queue.length >= this.tuning.MAX_QUEUE) {
       return {
         ok: false,

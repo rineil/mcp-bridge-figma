@@ -64,6 +64,39 @@ describe("enqueue", () => {
     expect(res).toMatchObject({ ok: false, code: "ambiguous_session" });
   });
 
+  it("refuses when one file is open on two different pages", () => {
+    const r = new LiveRegistry();
+    openOne(r, "S1", { fileKey: "A", pageId: "1:1" });
+    openOne(r, "S2", { fileKey: "A", pageId: "2:2" });
+    expect(r.enqueue(cmd("c1"), T0)).toMatchObject({
+      ok: false,
+      code: "ambiguous_session",
+    });
+  });
+
+  it("takes the freshest when duplicate panels sit on the same file+page", () => {
+    // Reopening the panel, or Figma open in both the app and a browser tab,
+    // leaves a stale session polling alongside the new one. Both answer for the
+    // same document, so this is not ambiguous — refusing here would block every
+    // capture until the old session aged out.
+    const r = new LiveRegistry();
+    openOne(r, "OLD", { fileKey: null, fileName: "DP RENT_BDS", pageId: "13:2" });
+    openOne(r, "NEW", { fileKey: null, fileName: "DP RENT_BDS", pageId: "13:2" });
+    r.touch(
+      "NEW",
+      {
+        fileKey: null,
+        fileName: "DP RENT_BDS",
+        pageId: "13:2",
+        pageName: "Main Design",
+        selectionCount: 1,
+      },
+      T0 + 5_000,
+    );
+    const res = r.enqueue(cmd("c1"), T0 + 5_000);
+    expect(res).toMatchObject({ ok: true, sessionId: "NEW" });
+  });
+
   it("disambiguates two sessions by expected fileKey", () => {
     const r = new LiveRegistry();
     openOne(r, "S1", { fileKey: "A" });
