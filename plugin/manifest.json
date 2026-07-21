@@ -7,6 +7,6 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": ["none"],
-    "devAllowedDomains": ["http://localhost:3845"]
+    "devAllowedDomains": ["http://localhost:3846", "http://localhost:3845"]
   }
 }

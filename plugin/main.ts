@@ -2,6 +2,7 @@
 
 import {
   buildExportPayload,
+  PLUGIN_VERSION,
   type ExportPhase,
   type ExportScope,
 } from "./serialize";
@@ -15,7 +16,148 @@ type ExportMsg = {
   includeRaster: boolean;
 };
 type PingMsg = { type: "ping"; bridgeUrl: string; token: string };
-type UiMessage = ExportMsg | PingMsg;
+type LiveMsg = {
+  type: "live";
+  enabled: boolean;
+  bridgeUrl: string;
+  token: string;
+};
+type UiMessage = ExportMsg | PingMsg | LiveMsg;
+
+type LiveCommand = {
+  id: string;
+  op: string;
+  params: { phase: ExportPhase; scope: ExportScope; includeRaster: boolean };
+};
+
+/**
+ * Live channel: the bridge cannot reach into Figma, so the panel asks it for
+ * work. Bumping the generation cancels the running loop — sandbox `fetch` has
+ * no `signal` (FetchOptions carries no AbortController), so an in-flight poll
+ * cannot be aborted and is instead ignored on arrival.
+ *
+ * Self-scheduling rather than setInterval: a slow poll must not let ticks stack
+ * up behind it.
+ */
+const liveLoop: { generation: number; running: boolean; sessionId?: string } = {
+  generation: 0,
+  running: false,
+};
+
+function liveStatusToUi(state: string, detail?: string): void {
+  figma.ui.postMessage({ type: "liveStatus", state, detail });
+}
+
+async function runLiveCommand(
+  cmd: LiveCommand,
+): Promise<{ ok: true; payload: unknown } | { ok: false; error: string }> {
+  try {
+    const payload = await buildExportPayload({
+      phase: cmd.params.phase,
+      scope: cmd.params.scope,
+      includeRaster: cmd.params.includeRaster,
+    });
+    return { ok: true, payload };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+async function liveTick(base: string, token: string, gen: number): Promise<void> {
+  if (gen !== liveLoop.generation) {
+    return;
+  }
+  let delay = 500;
+  try {
+    const res = await fetch(`${base}/poll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Token": token },
+      body: JSON.stringify({
+        sessionId: liveLoop.sessionId,
+        pluginVersion: PLUGIN_VERSION,
+        // Re-read identity every poll so the server notices a file/page switch
+        // instead of answering confidently about the wrong document.
+        fileKey: figma.fileKey ?? null,
+        fileName: figma.root.name,
+        pageId: figma.currentPage.id,
+        pageName: figma.currentPage.name,
+        selectionCount: figma.currentPage.selection.length,
+      }),
+    });
+    if (gen !== liveLoop.generation) {
+      return;
+    }
+    if (res.status === 401) {
+      liveLoop.running = false;
+      liveStatusToUi("error", "Token sai — kiểm tra lại Bridge token.");
+      return;
+    }
+    if (!res.ok) {
+      liveStatusToUi("retrying", `Bridge trả ${res.status}`);
+      delay = 3000;
+    } else {
+      // The server always sends a JSON body, including when idle: FetchResponse
+      // has no `.body` to test and `json()` on an empty 204 would throw here and
+      // kill the loop on its first idle tick.
+      const data = (await res.json()) as {
+        sessionId?: string;
+        commands?: LiveCommand[];
+      };
+      if (data.sessionId) {
+        liveLoop.sessionId = data.sessionId;
+      }
+      const commands = data.commands ?? [];
+      liveStatusToUi(commands.length ? "working" : "connected");
+      for (const cmd of commands) {
+        const out = await runLiveCommand(cmd);
+        if (gen !== liveLoop.generation) {
+          return;
+        }
+        await fetch(`${base}/result`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Bridge-Token": token,
+          },
+          body: JSON.stringify({
+            sessionId: liveLoop.sessionId,
+            requestId: cmd.id,
+            ok: out.ok,
+            error: out.ok ? undefined : out.error,
+            payload: out.ok ? out.payload : undefined,
+          }),
+        });
+      }
+      if (commands.length > 0) {
+        liveStatusToUi("connected");
+        delay = 0; // more may be queued
+      }
+    }
+  } catch (e) {
+    liveStatusToUi("retrying", e instanceof Error ? e.message : String(e));
+    delay = 3000;
+  }
+  if (gen !== liveLoop.generation) {
+    return;
+  }
+  setTimeout(() => {
+    void liveTick(base, token, gen);
+  }, delay);
+}
+
+function startLive(base: string, token: string): void {
+  liveLoop.generation++;
+  liveLoop.running = true;
+  liveLoop.sessionId = undefined;
+  liveStatusToUi("connecting");
+  void liveTick(base, token, liveLoop.generation);
+}
+
+function stopLive(): void {
+  liveLoop.generation++; // orphans any in-flight poll
+  liveLoop.running = false;
+  liveStatusToUi("off");
+}
 
 async function pingHealth(
   base: string,
@@ -44,6 +186,15 @@ async function saveSettings(msg: ExportMsg): Promise<void> {
 }
 
 figma.ui.onmessage = async (msg: UiMessage) => {
+  if (msg.type === "live") {
+    await figma.clientStorage.setAsync("liveEnabled", msg.enabled);
+    if (msg.enabled) {
+      startLive(msg.bridgeUrl.replace(/\/$/, ""), msg.token ?? "");
+    } else {
+      stopLive();
+    }
+    return;
+  }
   if (msg.type === "ping") {
     const base = msg.bridgeUrl.replace(/\/$/, "");
     const h = await pingHealth(base);
@@ -194,6 +345,11 @@ const html = `
   <label for="raster" style="margin:0;font-weight:500">PNG preview (phase 3, tối đa 8 màn + 12 ảnh nhúng)</label>
 </div>
 <button id="run">Export → bridge</button>
+<div class="row" style="margin-top:12px;border-top:1px solid rgba(128,128,128,.25);padding-top:10px">
+  <input type="checkbox" id="live" style="width:auto;margin:0" />
+  <label for="live" style="margin:0;font-weight:500">Chế độ live — cho AI tự lấy dữ liệu</label>
+</div>
+<div class="log" id="liveLog">Tắt. Bật để Cursor/Claude gọi figma_bridge_live_capture mà bạn không phải bấm export. Panel phải mở.</div>
 <div class="log" id="log"></div>
 <script>
   const $ = (id) => document.getElementById(id);
@@ -223,8 +379,24 @@ const html = `
       type: "ping", bridgeUrl: $("url").value.trim(), token: $("token").value.trim(),
     } }, "*");
   }
+  function doLive() {
+    parent.postMessage({ pluginMessage: {
+      type: "live",
+      enabled: $("live").checked,
+      bridgeUrl: $("url").value.trim(),
+      token: $("token").value.trim(),
+    } }, "*");
+  }
   run.onclick = doExport;
   $("ping").onclick = doPing;
+  $("live").onchange = doLive;
+
+  const LIVE_TEXT = {
+    off: 'Tắt. Bật để Cursor/Claude gọi figma_bridge_live_capture mà bạn không phải bấm export. Panel phải mở.',
+    connecting: '<span class="warn">Đang kết nối…</span>',
+    connected: '<span class="ok">● Live — đang chờ yêu cầu từ AI.</span> Giữ panel mở.',
+    working: '<span class="ok">● Đang phục vụ một yêu cầu…</span>',
+  };
 
   window.onmessage = (event) => {
     const m = event.data.pluginMessage;
@@ -240,6 +412,16 @@ const html = `
     }
     if (m.type === "health") {
       setPill(m.ok ? "ok" : "bad", m.message);
+      return;
+    }
+    if (m.type === "liveStatus") {
+      const box = $("liveLog");
+      if (m.state === "error" || m.state === "retrying") {
+        box.innerHTML = '<span class="err">⚠ ' + (m.detail || m.state) + '</span>';
+        if (m.state === "error") $("live").checked = false;
+      } else {
+        box.innerHTML = LIVE_TEXT[m.state] || m.state;
+      }
       return;
     }
     if (m.type === "done") {

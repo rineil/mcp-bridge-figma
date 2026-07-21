@@ -147,6 +147,8 @@ Ký tự đầu phải là `{` (không được xuống dòng hay `>` trước �
 | `figma_bridge_list_components` | **Inventory component** (phase 3): gom INSTANCE theo main component → `[{id,name,count,instanceIds,hasDefinition}]` để nhận diện component lặp ("Button ×14") |
 | `figma_bridge_read_component` | Đọc **định nghĩa** component theo id (registry phase 3, component **local**) — bản canonical; instance mang `component.overrides` cho phần khác biệt |
 | `figma_bridge_diff_exports` | So **hai export** → `[{id,name,type,change}]`: design đã đổi ở **đâu** kể từ lần sinh code. Bỏ qua nhánh có hash trùng; không tham số thì so export liền trước với `latest` |
+| `figma_bridge_live_status` | Panel Figma **có đang mở không**, đang ở file/page nào. Rẻ, không gọi sang Figma |
+| `figma_bridge_live_capture` | **Lấy export mới ngay từ panel đang mở** — khỏi bấm export tay. Trả về basename để đọc/diff như file thường |
 | `figma_bridge_read_export` | Đọc **nguyên** một file (fallback cho file nhỏ) |
 | `figma_bridge_export_schema_hint` | Mô tả nhanh các phase + gợi ý schema |
 
@@ -175,6 +177,22 @@ JSON cho biết **giá trị là gì**; ảnh render cho biết **trông phải 
 3. So với output của mình rồi sửa chỗ lệch.
 
 `meta.rasterReport.skipped` giải thích ảnh nào không kèm được và **vì sao**, nên "thiếu ảnh" không bao giờ bị hiểu nhầm thành "thiết kế không có ảnh".
+
+### Chế độ live — khỏi bấm export mỗi lần
+
+Tick **"Chế độ live"** trong plugin. Panel sẽ poll bridge, và AI gọi được **`figma_bridge_live_capture`** để tự lấy dữ liệu mới từ Figma — bạn không phải bấm gì.
+
+```
+Cursor ──live_capture──► MCP ──hàng đợi──► panel poll ──serialize──► exports/*.json
+```
+
+Kết quả được ghi thành **file export bình thường**, nên mọi tool đọc sẵn có (`outline` / `read_node` / `get_raster` / `diff_exports`) dùng được ngay.
+
+> ⚠️ **Giới hạn không thể lách:** Figma **không chạy plugin ở nền**. Panel phải **đang mở, trong đúng file đó**. AI **không đánh thức Figma được** — gọi `figma_bridge_live_status` trước sẽ biết ngay panel có mở không thay vì chờ timeout. Chạy plugin Figma khác cũng làm dừng bridge (Figma chỉ cho 1 plugin chạy).
+>
+> Live chỉ hoạt động qua bridge **nhúng trong tiến trình MCP** (hàng đợi nằm trong RAM tiến trình đó). Nếu chạy `pnpm bridge` riêng và đặt `BRIDGE_EMBED=0`, live tool sẽ báo lỗi rõ ràng thay vì treo.
+>
+> **Cổng mặc định đổi thành 3846** (3845 là cổng Figma Dev Mode MCP, rất dễ đụng).
 
 ### Biết design đã đổi ở đâu
 
