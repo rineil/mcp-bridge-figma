@@ -92,6 +92,17 @@ async function liveTick(base: string, token: string, gen: number): Promise<void>
       liveStatusToUi("error", "Token sai — kiểm tra lại Bridge token.");
       return;
     }
+    if (res.status === 404) {
+      // /health answered but /poll is missing: this bridge has no live channel.
+      // Almost always a standalone `pnpm bridge` instead of the MCP-embedded one.
+      // Terminal, not retryable — stop and tell the user how to fix it.
+      liveLoop.running = false;
+      liveStatusToUi(
+        "error",
+        "Bridge này không hỗ trợ live. Live cần bridge nhúng trong MCP server, không phải `pnpm bridge`. Tắt `pnpm bridge` và trỏ plugin tới cổng MCP (mặc định 3846).",
+      );
+      return;
+    }
     if (!res.ok) {
       liveStatusToUi("retrying", `Bridge trả ${res.status}`);
       delay = 3000;
@@ -165,7 +176,24 @@ async function pingHealth(
   try {
     const res = await fetch(`${base}/health`);
     if (res.ok) {
-      return { ok: true, status: res.status, message: "Bridge OK" };
+      // /health reports whether this bridge carries the live channel (an object)
+      // or is ingest-only (`live: null`). Surfacing it here means "check
+      // connection" tells the truth up front, instead of the user ticking Live
+      // and hitting a 404 against a bridge that answered /health perfectly.
+      let liveSupported = false;
+      try {
+        const body = (await res.json()) as { live?: unknown };
+        liveSupported = body.live !== null && body.live !== undefined;
+      } catch {
+        /* older bridge without the field */
+      }
+      return {
+        ok: true,
+        status: res.status,
+        message: liveSupported
+          ? "Bridge OK · live sẵn sàng"
+          : "Bridge OK · bridge này KHÔNG hỗ trợ live (dùng MCP server, không phải `pnpm bridge`)",
+      };
     }
     return { ok: false, status: res.status, message: `Bridge lỗi (${res.status})` };
   } catch {

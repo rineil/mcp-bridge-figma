@@ -209,18 +209,35 @@ export function createBridgeServer(opts: BridgeOptions): Server {
       return;
     }
 
-    if (live && route === "POST /poll") {
-      await live.handlePoll(req, res, maxBytes);
-      return;
-    }
-
-    if (live && route === "POST /result") {
-      await live.handleResult(req, res);
-      return;
-    }
-
-    if (live && route === "POST /live/request") {
-      await live.handleRequest(req, res);
+    if (
+      route === "POST /poll" ||
+      route === "POST /result" ||
+      route === "POST /live/request"
+    ) {
+      // The live queue is fed by MCP tool handlers, which run only in the MCP
+      // process — a standalone `pnpm bridge` has nothing to enqueue into it, so
+      // it cannot serve live even though it answers /health. Say so plainly
+      // instead of a bare 404, which reads as "connection broken" while the
+      // connection is in fact fine.
+      if (!live) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error: "live_not_supported",
+            message:
+              "This bridge does not serve the live channel. Live works only through the bridge embedded in the MCP server, not `pnpm bridge`. Point the plugin at the MCP server's port and stop the standalone bridge.",
+          }),
+        );
+        return;
+      }
+      if (route === "POST /poll") {
+        await live.handlePoll(req, res, maxBytes);
+      } else if (route === "POST /result") {
+        await live.handleResult(req, res);
+      } else {
+        await live.handleRequest(req, res);
+      }
       return;
     }
 
