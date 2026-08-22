@@ -63,6 +63,7 @@ async function proxyLive(
     scope: "selection" | "page";
     includeRaster: boolean;
     assetFormats?: Array<"svg" | "png" | "jpg" | "pdf">;
+    assetMode?: "frame" | "icons";
   },
   expectFileKey?: string,
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
@@ -633,7 +634,14 @@ server.registerTool(
         .array(z.enum(["svg", "png", "jpg", "pdf"]))
         .optional()
         .describe(
-          "Also export nodes the designer marked for Export in Figma, in these formats. e.g. [\"svg\"] pulls every marked icon as inline SVG. Listed in meta.assetReport; fetch one with figma_bridge_get_asset. Omit to skip.",
+          "Also export assets in these formats, e.g. [\"svg\"]. Listed in meta.assetReport; fetch one with figma_bridge_get_asset. Omit to skip. Gated by the user's plugin checkboxes.",
+        ),
+      assetMode: z
+        .enum(["frame", "icons"])
+        .optional()
+        .default("icons")
+        .describe(
+          '"icons" (default): auto-detect icons inside the selection — designer-marked nodes, vectors, small icon-font glyph containers. "frame": export each selected root itself as one asset (e.g. one big illustration).',
         ),
       fileKey: z
         .string()
@@ -641,9 +649,9 @@ server.registerTool(
         .describe("Only act if the connected panel is on this Figma file."),
     }),
   },
-  async ({ scope, phase, includeRaster, assetFormats, fileKey }) => {
+  async ({ scope, phase, includeRaster, assetFormats, assetMode, fileKey }) => {
     const op = includeRaster ? "screenshot" : "selection";
-    const params = { phase, scope, includeRaster, assetFormats };
+    const params = { phase, scope, includeRaster, assetFormats, assetMode };
     let out: LiveOutcome;
     if (liveState.unavailable) {
       const proxied = await proxyLive(op, params, fileKey);

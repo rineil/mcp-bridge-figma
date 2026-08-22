@@ -4,6 +4,7 @@ import {
   buildExportPayload,
   PLUGIN_VERSION,
   type AssetFormat,
+  type AssetMode,
   type ExportPhase,
   type ExportScope,
 } from "./serialize";
@@ -17,6 +18,7 @@ type ExportMsg = {
   token: string;
   includeRaster: boolean;
   assetFormats: AssetFormat[];
+  assetMode: AssetMode;
 };
 type PingMsg = { type: "ping"; bridgeUrl: string; token: string };
 type LiveMsg = {
@@ -25,9 +27,14 @@ type LiveMsg = {
   bridgeUrl: string;
   token: string;
   assetFormats: AssetFormat[];
+  assetMode: AssetMode;
 };
-/** User's asset-format allowlist, updated whenever a checkbox toggles. */
-type AssetPrefsMsg = { type: "assetPrefs"; assetFormats: AssetFormat[] };
+/** User's asset allowlist + mode, updated whenever a control changes. */
+type AssetPrefsMsg = {
+  type: "assetPrefs";
+  assetFormats: AssetFormat[];
+  assetMode: AssetMode;
+};
 type UiMessage = ExportMsg | PingMsg | LiveMsg | AssetPrefsMsg;
 
 /**
@@ -35,7 +42,10 @@ type UiMessage = ExportMsg | PingMsg | LiveMsg | AssetPrefsMsg;
  * request formats, but nothing is produced that the user has not ticked — the
  * checkboxes are a permission gate, not just a default.
  */
-const assetPrefs: { allowed: AssetFormat[] } = { allowed: [] };
+const assetPrefs: { allowed: AssetFormat[]; mode: AssetMode } = {
+  allowed: [],
+  mode: "icons",
+};
 
 type LiveCommand = {
   id: string;
@@ -45,6 +55,7 @@ type LiveCommand = {
     scope: ExportScope;
     includeRaster: boolean;
     assetFormats?: AssetFormat[];
+    assetMode?: AssetMode;
   };
 };
 
@@ -75,6 +86,8 @@ async function runLiveCommand(
       scope: cmd.params.scope,
       includeRaster: cmd.params.includeRaster,
       assetFormats: gateAssetFormats(assetPrefs.allowed, cmd.params.assetFormats),
+      // The AI may suggest a mode, but the panel's select is the user's call.
+      assetMode: cmd.params.assetMode ?? assetPrefs.mode,
     });
     return { ok: true, payload };
   } catch (e) {
@@ -231,17 +244,22 @@ async function saveSettings(msg: ExportMsg): Promise<void> {
   await figma.clientStorage.setAsync("scope", msg.scope);
   await figma.clientStorage.setAsync("includeRaster", msg.includeRaster);
   await figma.clientStorage.setAsync("assetFormats", msg.assetFormats);
+  await figma.clientStorage.setAsync("assetMode", msg.assetMode);
 }
 
 figma.ui.onmessage = async (msg: UiMessage) => {
   if (msg.type === "assetPrefs") {
     assetPrefs.allowed = msg.assetFormats;
+    assetPrefs.mode = msg.assetMode;
     await figma.clientStorage.setAsync("assetFormats", msg.assetFormats);
+    await figma.clientStorage.setAsync("assetMode", msg.assetMode);
     return;
   }
   if (msg.type === "live") {
     assetPrefs.allowed = msg.assetFormats;
+    assetPrefs.mode = msg.assetMode;
     await figma.clientStorage.setAsync("assetFormats", msg.assetFormats);
+    await figma.clientStorage.setAsync("assetMode", msg.assetMode);
     await figma.clientStorage.setAsync("liveEnabled", msg.enabled);
     if (msg.enabled) {
       startLive(msg.bridgeUrl.replace(/\/$/, ""), msg.token ?? "");
@@ -283,6 +301,7 @@ figma.ui.onmessage = async (msg: UiMessage) => {
       scope: msg.scope,
       includeRaster: Boolean(msg.includeRaster),
       assetFormats: msg.assetFormats,
+      assetMode: msg.assetMode,
     });
     const res = await fetch(`${base}/export`, {
       method: "POST",
@@ -402,14 +421,21 @@ const html = `
 </div>
 <button id="run">Export → bridge</button>
 <div style="margin-top:12px">
-  <label style="margin-bottom:4px">Export asset (icon có Export settings trong Figma)</label>
-  <div class="row" style="flex-wrap:wrap;gap:4px 14px;margin-bottom:2px">
-    <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_svg" value="svg" style="width:auto;margin:0" /><label for="af_svg" style="margin:0;font-weight:500">SVG</label></span>
-    <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_png" value="png" style="width:auto;margin:0" /><label for="af_png" style="margin:0;font-weight:500">PNG</label></span>
-    <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_jpg" value="jpg" style="width:auto;margin:0" /><label for="af_jpg" style="margin:0;font-weight:500">JPG</label></span>
-    <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_pdf" value="pdf" style="width:auto;margin:0" /><label for="af_pdf" style="margin:0;font-weight:500">PDF</label></span>
+  <label style="margin-bottom:4px">Export asset</label>
+  <select id="assetMode">
+    <option value="off" selected>Không xuất asset</option>
+    <option value="icons">Icon trong frame — tự detect icon bên trong selection</option>
+    <option value="frame">Cả frame — xuất chính selection thành 1 file</option>
+  </select>
+  <div id="assetFormats" style="display:none">
+    <div class="row" style="flex-wrap:wrap;gap:4px 14px;margin-bottom:2px">
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_svg" value="svg" style="width:auto;margin:0" /><label for="af_svg" style="margin:0;font-weight:500">SVG</label></span>
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_png" value="png" style="width:auto;margin:0" /><label for="af_png" style="margin:0;font-weight:500">PNG</label></span>
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_jpg" value="jpg" style="width:auto;margin:0" /><label for="af_jpg" style="margin:0;font-weight:500">JPG</label></span>
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_pdf" value="pdf" style="width:auto;margin:0" /><label for="af_pdf" style="margin:0;font-weight:500">PDF</label></span>
+    </div>
+    <div class="hint" id="assetHint"></div>
   </div>
-  <div class="hint">Bạn cho phép MCP lấy asset ở những format này. Bỏ trống = không xuất asset.</div>
 </div>
 <div class="row" style="margin-top:6px;border-top:1px solid rgba(128,128,128,.25);padding-top:10px">
   <input type="checkbox" id="live" style="width:auto;margin:0" />
@@ -428,9 +454,21 @@ const html = `
   function fmtKB(b) { return b ? (b / 1024).toFixed(1) + " KB" : "?"; }
 
   function assetFormats() {
+    if ($("assetMode").value === "off") return [];
     const out = [];
     document.querySelectorAll(".af").forEach((c) => { if (c.checked) out.push(c.value); });
     return out;
+  }
+  function assetMode() {
+    const v = $("assetMode").value;
+    return v === "off" ? "icons" : v; // mode is moot when formats are empty
+  }
+  function syncAssetUi() {
+    const v = $("assetMode").value;
+    $("assetFormats").style.display = v === "off" ? "none" : "block";
+    $("assetHint").textContent = v === "frame"
+      ? "Xuất chính selection thành file. Chú ý: frame lớn xuất SVG có thể vượt trần 512KB."
+      : "Tự tìm icon trong selection: node đã đánh dấu Export, vector, và glyph icon-font (Font Awesome…). Tick format bạn cho phép MCP lấy.";
   }
 
   function doExport() {
@@ -444,6 +482,7 @@ const html = `
       token: $("token").value.trim(),
       includeRaster: $("raster").checked,
       assetFormats: assetFormats(),
+      assetMode: assetMode(),
     } }, "*");
   }
   function doPing() {
@@ -459,16 +498,19 @@ const html = `
       bridgeUrl: $("url").value.trim(),
       token: $("token").value.trim(),
       assetFormats: assetFormats(),
+      assetMode: assetMode(),
     } }, "*");
   }
   function doAssetPrefs() {
     // Keep the main thread's allowlist current even while Live is already on.
-    parent.postMessage({ pluginMessage: { type: "assetPrefs", assetFormats: assetFormats() } }, "*");
+    syncAssetUi();
+    parent.postMessage({ pluginMessage: { type: "assetPrefs", assetFormats: assetFormats(), assetMode: assetMode() } }, "*");
   }
   run.onclick = doExport;
   $("ping").onclick = doPing;
   $("live").onchange = doLive;
   document.querySelectorAll(".af").forEach((c) => { c.onchange = doAssetPrefs; });
+  $("assetMode").onchange = doAssetPrefs;
 
   const LIVE_TEXT = {
     off: 'Tắt. Bật để Cursor/Claude gọi figma_bridge_live_capture mà bạn không phải bấm export. Panel phải mở.',
@@ -488,6 +530,8 @@ const html = `
       $("raster").checked = !!m.includeRaster;
       const af = Array.isArray(m.assetFormats) ? m.assetFormats : [];
       document.querySelectorAll(".af").forEach((c) => { c.checked = af.indexOf(c.value) !== -1; });
+      $("assetMode").value = af.length === 0 ? "off" : (m.assetMode === "frame" ? "frame" : "icons");
+      syncAssetUi();
       doPing();
       return;
     }
@@ -544,9 +588,11 @@ void (async () => {
   const scope = (await get("scope")) as string | undefined;
   const includeRaster = (await get("includeRaster")) as boolean | undefined;
   const savedFormats = (await get("assetFormats")) as AssetFormat[] | undefined;
+  const savedMode = (await get("assetMode")) as AssetMode | undefined;
   // Seed the allowlist before the UI can toggle Live, so a capture arriving
   // immediately after the panel opens honours the stored preference.
   assetPrefs.allowed = Array.isArray(savedFormats) ? savedFormats : [];
+  assetPrefs.mode = savedMode === "frame" ? "frame" : "icons";
   figma.ui.postMessage({
     type: "init",
     bridgeUrl: typeof url === "string" && url ? url : "http://localhost:3846",
@@ -555,5 +601,6 @@ void (async () => {
     scope: scope === "page" ? "page" : "selection",
     includeRaster: includeRaster === true,
     assetFormats: assetPrefs.allowed,
+    assetMode: assetPrefs.mode,
   });
 })();

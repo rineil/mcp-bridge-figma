@@ -7,6 +7,21 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — chế độ export asset (frame / icon-trong-frame)
+
+- Select **Export asset** trong plugin: *Icon trong frame* (mặc định) tự detect
+  icon bên trong selection; *Cả frame* xuất chính selection thành 1 file. Format
+  chỉ hiện khi bật. Lần đầu dùng thực tế lộ đúng lỗ hổng: chọn frame 1920px có
+  Export settings → export cả frame thành SVG 15MB bị cap chặn, còn icon con thì
+  không ra cái nào.
+- Detect icon (`isIconCandidate`, pure + test): node đánh dấu Export, VECTOR /
+  BOOLEAN_OPERATION, container ≤64px chỉ chứa vector **hoặc glyph icon-font**
+  (Font Awesome, Material Icons… — design system này vẽ icon bằng TEXT Font
+  Awesome, không phải vector) và không chứa text thường. Dừng ở icon đã nhận —
+  ruột icon không export lẻ.
+- `assetMode` luồng qua UI → clientStorage → live command → MCP tool → proxy.
+  Chế độ trong panel là lựa chọn của user; AI chỉ gợi ý khi user chưa đặt.
+
 ### Added — export asset (icon/ảnh)
 
 - Plugin có nhóm checkbox **SVG / PNG / JPG / PDF**. Node có **`exportSettings`

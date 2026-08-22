@@ -199,13 +199,18 @@ Kết quả được ghi thành **file export bình thường**, nên mọi tool
 
 ### Tự export icon/asset từ Figma
 
-Trong plugin có nhóm checkbox **SVG / PNG / JPG / PDF** — bạn tick format nào thì **cho phép** MCP lấy asset ở format đó (bỏ trống = không lấy). Nguồn asset là các node **designer đã bật Export** trong panel Figma (`exportSettings`) — đúng "theo figma hiện có", không đoán bừa.
+Trong plugin có select **Export asset** với 2 chế độ + nhóm checkbox format (chỉ hiện khi bật):
 
-Khi live, AI gọi `figma_bridge_live_capture` với `assetFormats: ["svg"]` (hoặc export tay có tick), plugin xuất mọi icon đã đánh dấu. Rồi:
-- `meta.assetReport` liệt kê `[{id,name,formats}]`.
-- `figma_bridge_get_asset {nodeId, format}` lấy một cái: **SVG trả markup inline thẳng vào code**, PNG/JPG trả image block để nhìn.
+| Chế độ | Lấy gì |
+|---|---|
+| **Icon trong frame** | Chọn frame → tự detect icon bên trong: node đã đánh dấu Export, vector, và **glyph icon-font** (Font Awesome, Material Icons…) container ≤64px không chứa text thường. Dừng ở icon — ruột icon không export lẻ |
+| **Cả frame** | Xuất chính selection thành 1 file (illustration, ảnh lớn…) |
 
-> ⚠️ Checkbox của bạn là **cổng cho phép**: AI yêu cầu PNG nhưng bạn chỉ tick SVG thì chỉ SVG ra. Bỏ trống hết = MCP không lấy asset nào, dù AI có xin.
+Khi live, AI gọi `figma_bridge_live_capture` với `assetFormats: ["svg"]` (+ `assetMode` nếu muốn), hoặc export tay. Rồi:
+- `meta.assetReport` liệt kê `[{id,name,formats}]` + lý do node bị bỏ.
+- `figma_bridge_get_asset {nodeId, format}`: **SVG trả markup inline thẳng vào code**, PNG/JPG trả image block để nhìn.
+
+> ⚠️ Checkbox format là **cổng cho phép**: AI yêu cầu PNG nhưng bạn chỉ tick SVG thì chỉ SVG ra. Chọn "Không xuất asset" = MCP không lấy gì, dù AI có xin. Chế độ trong panel cũng là lựa chọn của bạn — AI chỉ gợi ý được khi bạn chưa đặt.
 
 ### Biết design đã đổi ở đâu
 
