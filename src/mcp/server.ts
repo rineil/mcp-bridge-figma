@@ -714,7 +714,12 @@ server.registerTool(
       svg?: string;
       rasterKeys?: Record<string, string>;
     }>;
-    const asset = assets.find((a) => a.id === nodeId);
+    // Duplicate icons are stored once; other node ids with identical bytes map
+    // to the canonical asset via assetAliases. Resolve before failing so an
+    // agent can ask about ANY node it saw in the tree.
+    const aliases = (res.data.assetAliases ?? {}) as Record<string, string>;
+    const canonicalId = aliases[nodeId] ?? nodeId;
+    const asset = assets.find((a) => a.id === canonicalId);
     if (!asset) {
       return {
         ...jsonText({

@@ -30,3 +30,33 @@ describe("gateAssetFormats", () => {
     ]);
   });
 });
+
+import { assetContentKey } from "../plugin/pure";
+
+describe("assetContentKey", () => {
+  it("is identical for identical content regardless of request order", () => {
+    const a = assetContentKey([["svg", "<svg>x</svg>"], ["png", "AAAA"]]);
+    const b = assetContentKey([["png", "AAAA"], ["svg", "<svg>x</svg>"]]);
+    expect(a).toBe(b);
+  });
+
+  it("differs when any format's content differs", () => {
+    const a = assetContentKey([["svg", "<svg>x</svg>"]]);
+    const b = assetContentKey([["svg", "<svg>y</svg>"]]);
+    expect(a).not.toBe(b);
+  });
+
+  it("keeps override-recoloured icons distinct (same component, new fill)", () => {
+    // The reason dedup hashes CONTENT and not the source component id: two
+    // instances of one component can render different bytes via overrides.
+    const white = assetContentKey([["svg", '<path fill="white"/>']]);
+    const dark = assetContentKey([["svg", '<path fill="#020618"/>']]);
+    expect(white).not.toBe(dark);
+  });
+
+  it("differs when one side has an extra format", () => {
+    const a = assetContentKey([["svg", "s"]]);
+    const b = assetContentKey([["svg", "s"], ["png", "p"]]);
+    expect(a).not.toBe(b);
+  });
+});

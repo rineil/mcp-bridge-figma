@@ -10,6 +10,7 @@ import {
   attachHashes,
   cssTextDecoration,
   cssTextTransform,
+  assetContentKey,
   fitPreviewScale,
   hashString,
   isIconCandidate,
@@ -884,6 +885,12 @@ function collectAssetTargets(
   };
 
   const visit = (n: SceneNode): void => {
+    // A hidden subtree renders nothing: exporting it only produces "no visible
+    // layers" failures (27 of them on one real admin screen — toggled-off
+    // variant states inside instances). Not an icon, not worth a skip entry.
+    if (!n.visible) {
+      return;
+    }
     if ("exportAsync" in n && !seen.has(n.id) && classify(n)) {
       seen.add(n.id);
       out.push(n);
@@ -1073,6 +1080,9 @@ export async function buildExportPayload(opts: {
   // ticking PNG gets PNG even where the node's own Figma preset is SVG.
   const assets: AssetInfo[] = [];
   const assetSkipped: RasterSkip[] = [];
+  /** aliasNodeId -> canonical asset id, for nodes whose export bytes matched. */
+  const assetAliases: Record<string, string> = {};
+  const seenAssetContent = new Map<string, string>();
   const assetFormats = opts.assetFormats ?? [];
   const assetMode: AssetMode = opts.assetMode ?? "icons";
   if (assetFormats.length > 0) {
@@ -1085,15 +1095,15 @@ export async function buildExportPayload(opts: {
         });
         continue;
       }
-      const info: AssetInfo = {
-        id: n.id,
-        name: n.name,
-        type: n.type,
-        formats: [],
-      };
       const exportable = n as SceneNode & {
         exportAsync: SceneNode["exportAsync"];
       };
+      // Stage every requested format first; nothing is committed until the
+      // content is hashed. A repeated table row exports the same glyph dozens
+      // of times (12x one icon on a real admin screen), and identity must come
+      // from the BYTES — two instances of one component can differ via colour
+      // overrides, so deduping by source component would merge distinct icons.
+      const staged: Array<[AssetFormat, string]> = [];
       for (const fmt of assetFormats) {
         try {
           if (fmt === "svg") {
@@ -1106,8 +1116,7 @@ export async function buildExportPayload(opts: {
               });
               continue;
             }
-            info.svg = svg;
-            info.formats.push("svg");
+            staged.push(["svg", svg]);
           } else {
             const bytes =
               fmt === "png"
@@ -1123,10 +1132,7 @@ export async function buildExportPayload(opts: {
               });
               continue;
             }
-            const key = `${n.id}@${fmt}`;
-            rasters[key] = uint8ToBase64(bytes);
-            (info.rasterKeys ??= {})[fmt] = key;
-            info.formats.push(fmt);
+            staged.push([fmt, uint8ToBase64(bytes)]);
           }
         } catch (e) {
           assetSkipped.push({
@@ -1136,9 +1142,33 @@ export async function buildExportPayload(opts: {
           });
         }
       }
-      if (info.formats.length > 0) {
-        assets.push(info);
+      if (staged.length === 0) {
+        continue;
       }
+      const contentKey = assetContentKey(staged);
+      const canonical = seenAssetContent.get(contentKey);
+      if (canonical) {
+        assetAliases[n.id] = canonical;
+        continue;
+      }
+      seenAssetContent.set(contentKey, n.id);
+      const info: AssetInfo = {
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        formats: [],
+      };
+      for (const [fmt, content] of staged) {
+        if (fmt === "svg") {
+          info.svg = content;
+        } else {
+          const key = `${n.id}@${fmt}`;
+          rasters[key] = content;
+          (info.rasterKeys ??= {})[fmt] = key;
+        }
+        info.formats.push(fmt);
+      }
+      assets.push(info);
     }
   }
 
@@ -1175,19 +1205,26 @@ export async function buildExportPayload(opts: {
       requested: assetFormats,
       mode: assetMode,
       count: assets.length,
+      // A table screen repeats the same glyph per row; those export to
+      // identical bytes and are stored once. aliasCount says how many node ids
+      // resolved to an already-stored asset.
+      aliasCount: Object.keys(assetAliases).length,
       assets: assets.map((a) => ({
         id: a.id,
         name: a.name,
         formats: a.formats,
       })),
       skipped: assetSkipped,
-      note: "Fetch one with figma_bridge_get_asset {nodeId, format}: svg returns inline markup to re-emit, png/jpg return an image block. Source = nodes marked for Export in Figma.",
+      note: "Fetch one with figma_bridge_get_asset {nodeId, format}: svg returns inline markup to re-emit, png/jpg return an image block. Duplicate icons are stored once — any node id in assetAliases resolves to its canonical asset.",
     };
   }
 
   const payload: Record<string, unknown> = { meta, roots };
   if (assets.length > 0) {
     payload.assets = assets;
+  }
+  if (Object.keys(assetAliases).length > 0) {
+    payload.assetAliases = assetAliases;
   }
 
   if (opts.phase >= 2) {

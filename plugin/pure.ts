@@ -813,3 +813,18 @@ export function isIconFontFamily(family: string): boolean {
     family,
   );
 }
+
+/**
+ * Identity of an asset by exported CONTENT, not by source component. Two
+ * instances of one component can render differently (colour overrides), and two
+ * unrelated nodes can render identically — only the bytes decide. Formats are
+ * sorted so key order never depends on request order.
+ */
+export function assetContentKey(
+  parts: ReadonlyArray<readonly [format: string, content: string]>,
+): string {
+  return [...parts]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([fmt, content]) => `${fmt}:${hashString(content)}`)
+    .join("|");
+}
