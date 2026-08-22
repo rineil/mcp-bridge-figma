@@ -33,6 +33,11 @@ const MAX_PREVIEWS = 8;
 // costs bytes without adding detail.
 const MAX_PREVIEW_SCALE = 2;
 const TEXT_CAP = 8000;
+// Assets = nodes the designer marked with Export settings in Figma. Icons come
+// in the dozens, so the cap is higher than previews; an icon SVG is a few KB, so
+// a fat cap here only catches a whole illustration exported by mistake.
+const MAX_ASSETS = 80;
+const MAX_SVG_CHARS = 512 * 1024;
 
 type Counter = { n: number; omitted: number };
 
@@ -800,10 +805,55 @@ export type PreviewInfo = {
 };
 export type RasterSkip = { key: string; name: string; reason: string };
 
+export type AssetFormat = "svg" | "png" | "jpg" | "pdf";
+
+export type AssetInfo = {
+  id: string;
+  name: string;
+  type: string;
+  formats: AssetFormat[];
+  /** SVG is inline text — an agent re-emits it as <svg> directly, no fetch. */
+  svg?: string;
+  /** Binary formats live in `rasters`; these are the keys to fetch them by. */
+  rasterKeys?: Partial<Record<"png" | "jpg" | "pdf", string>>;
+};
+
+/**
+ * Nodes the designer marked for export in Figma's right-panel Export section
+ * (`exportSettings` non-empty). This is the "theo figma hiện có" set — the icons
+ * and assets already intended for handoff, not every vector we could guess at.
+ */
+function collectAssetTargets(roots: readonly SceneNode[]): SceneNode[] {
+  const out: SceneNode[] = [];
+  const seen = new Set<string>();
+  const visit = (n: SceneNode): void => {
+    if (
+      "exportSettings" in n &&
+      n.exportSettings.length > 0 &&
+      "exportAsync" in n &&
+      !seen.has(n.id)
+    ) {
+      seen.add(n.id);
+      out.push(n);
+    }
+    if ("children" in n) {
+      for (const c of n.children) {
+        visit(c);
+      }
+    }
+  };
+  for (const r of roots) {
+    visit(r);
+  }
+  return out;
+}
+
 export async function buildExportPayload(opts: {
   phase: ExportPhase;
   scope: ExportScope;
   includeRaster: boolean;
+  /** Formats to export designer-marked asset nodes in. Empty = feature off. */
+  assetFormats?: AssetFormat[];
   maxDepth?: number;
   maxNodes?: number;
 }): Promise<Record<string, unknown>> {
@@ -961,6 +1011,81 @@ export async function buildExportPayload(opts: {
     }
   }
 
+  // Assets: export the designer-marked nodes in the user's chosen formats.
+  // Independent of phase/raster — an icon sheet is useful even on a phase-1
+  // capture. Each requested format is produced from the same node; Figma's
+  // exportAsync makes any format from any node, so a user ticking PNG gets PNG
+  // even where the node's own Figma preset is SVG.
+  const assets: AssetInfo[] = [];
+  const assetSkipped: RasterSkip[] = [];
+  const assetFormats = opts.assetFormats ?? [];
+  if (assetFormats.length > 0) {
+    for (const n of collectAssetTargets(rootsInput)) {
+      if (assets.length >= MAX_ASSETS) {
+        assetSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: `asset cap ${MAX_ASSETS} reached`,
+        });
+        continue;
+      }
+      const info: AssetInfo = {
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        formats: [],
+      };
+      const exportable = n as SceneNode & {
+        exportAsync: SceneNode["exportAsync"];
+      };
+      for (const fmt of assetFormats) {
+        try {
+          if (fmt === "svg") {
+            const svg = await exportable.exportAsync({ format: "SVG_STRING" });
+            if (svg.length > MAX_SVG_CHARS) {
+              assetSkipped.push({
+                key: `${n.id}@svg`,
+                name: n.name,
+                reason: `svg ${svg.length} chars > cap ${MAX_SVG_CHARS}`,
+              });
+              continue;
+            }
+            info.svg = svg;
+            info.formats.push("svg");
+          } else {
+            const bytes =
+              fmt === "png"
+                ? await exportable.exportAsync({ format: "PNG" })
+                : fmt === "jpg"
+                  ? await exportable.exportAsync({ format: "JPG" })
+                  : await exportable.exportAsync({ format: "PDF" });
+            if (bytes.length > MAX_IMAGE_BYTES) {
+              assetSkipped.push({
+                key: `${n.id}@${fmt}`,
+                name: n.name,
+                reason: `${bytes.length} bytes > cap ${MAX_IMAGE_BYTES}`,
+              });
+              continue;
+            }
+            const key = `${n.id}@${fmt}`;
+            rasters[key] = uint8ToBase64(bytes);
+            (info.rasterKeys ??= {})[fmt] = key;
+            info.formats.push(fmt);
+          }
+        } catch (e) {
+          assetSkipped.push({
+            key: `${n.id}@${fmt}`,
+            name: n.name,
+            reason: `export failed: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
+      }
+      if (info.formats.length > 0) {
+        assets.push(info);
+      }
+    }
+  }
+
   const meta: Record<string, unknown> = {
     pluginVersion: PLUGIN_VERSION,
     phase: opts.phase,
@@ -987,7 +1112,26 @@ export async function buildExportPayload(opts: {
     };
   }
 
+  // Light index of assets so outline/status can show what's exportable without
+  // carrying the SVG text. The bytes/text themselves ride in payload.assets.
+  if (assetFormats.length > 0) {
+    meta.assetReport = {
+      requested: assetFormats,
+      count: assets.length,
+      assets: assets.map((a) => ({
+        id: a.id,
+        name: a.name,
+        formats: a.formats,
+      })),
+      skipped: assetSkipped,
+      note: "Fetch one with figma_bridge_get_asset {nodeId, format}: svg returns inline markup to re-emit, png/jpg return an image block. Source = nodes marked for Export in Figma.",
+    };
+  }
+
   const payload: Record<string, unknown> = { meta, roots };
+  if (assets.length > 0) {
+    payload.assets = assets;
+  }
 
   if (opts.phase >= 2) {
     const snapshot = await variableSnapshot();

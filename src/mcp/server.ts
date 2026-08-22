@@ -58,7 +58,12 @@ const bridgeCfg = {
  */
 async function proxyLive(
   op: "status" | LiveOp,
-  params?: { phase: 1 | 2 | 3; scope: "selection" | "page"; includeRaster: boolean },
+  params?: {
+    phase: 1 | 2 | 3;
+    scope: "selection" | "page";
+    includeRaster: boolean;
+    assetFormats?: Array<"svg" | "png" | "jpg" | "pdf">;
+  },
   expectFileKey?: string,
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
   const url = `http://${bridgeCfg.host}:${bridgeCfg.port}/live/request`;
@@ -303,6 +308,7 @@ server.registerTool(
             phase3: "Adds component/variant/instance metadata + mainComponent refs + per-instance component.overrides; a top-level `components` registry of LOCAL component definitions (read via figma_bridge_read_component; group instances with figma_bridge_list_components). With the plugin's raster checkbox on, also ships PNG renders of each screen plus the bytes behind IMAGE fills.",
             notes: "Pass name:\"latest\" to any read tool to target the newest export. Each node has a ready `css` block + cssColor/cssGradient — apply them directly. imageHash on IMAGE fills is opaque (not a URL): with phase 3 + raster enabled, figma_bridge_get_raster returns an MCP image block (the agent can SEE it) keyed by node id or imageHash. Icons come through as geometry.fillGeometry SVG paths. For large exports, navigate with figma_bridge_export_outline / search_nodes / read_node instead of reading the whole file.",
             verifyGeneratedUI: "When phase 3 ran with raster on, meta.rasterReport.previews lists one rendered PNG per screen ({id,name,width,height}). After generating code from the JSON, call figma_bridge_get_raster with a preview id to SEE the intended design, then compare it against your output and fix what differs — the JSON says what the values are, the render shows what it should look like. meta.rasterReport.skipped explains any image that did not ship, so an absent raster is never mistaken for a design with no images.",
+            assets: "Passing assetFormats to figma_bridge_live_capture (or ticking formats in the plugin) exports the nodes the designer marked for Export in Figma. meta.assetReport lists them ({id,name,formats}); fetch one with figma_bridge_get_asset {nodeId,format}: svg returns inline markup to drop into code, png/jpg return an image block. The user's plugin checkboxes are a permission gate — only formats they ticked are produced.",
             schemaFile: "schema/export-v3.schema.json (repo-relative to mcp-bridge-figma); roots[] items follow $defs/node.",
           },
           null,
@@ -623,15 +629,21 @@ server.registerTool(
         .describe(
           "Phase 3 only: also render a PNG per screen so you can SEE the design. Slower.",
         ),
+      assetFormats: z
+        .array(z.enum(["svg", "png", "jpg", "pdf"]))
+        .optional()
+        .describe(
+          "Also export nodes the designer marked for Export in Figma, in these formats. e.g. [\"svg\"] pulls every marked icon as inline SVG. Listed in meta.assetReport; fetch one with figma_bridge_get_asset. Omit to skip.",
+        ),
       fileKey: z
         .string()
         .optional()
         .describe("Only act if the connected panel is on this Figma file."),
     }),
   },
-  async ({ scope, phase, includeRaster, fileKey }) => {
+  async ({ scope, phase, includeRaster, assetFormats, fileKey }) => {
     const op = includeRaster ? "screenshot" : "selection";
-    const params = { phase, scope, includeRaster };
+    const params = { phase, scope, includeRaster, assetFormats };
     let out: LiveOutcome;
     if (liveState.unavailable) {
       const proxied = await proxyLive(op, params, fileKey);
@@ -656,12 +668,97 @@ server.registerTool(
         isError: true,
       };
     }
+    const assetReport = (out.meta as Record<string, unknown> | undefined)
+      ?.assetReport as { count?: number } | undefined;
     return jsonText({
       saved: out.basename,
       bytes: out.bytes,
       meta: out.meta,
-      next: 'Read it with figma_bridge_export_outline {name:"latest"}, or diff it against the previous export with figma_bridge_diff_exports.',
+      next:
+        assetReport && (assetReport.count ?? 0) > 0
+          ? 'meta.assetReport lists exported assets — fetch one with figma_bridge_get_asset {nodeId, format}. Also read the export via figma_bridge_export_outline {name:"latest"}.'
+          : 'Read it with figma_bridge_export_outline {name:"latest"}, or diff it against the previous export with figma_bridge_diff_exports.',
     });
+  },
+);
+
+server.registerTool(
+  "figma_bridge_get_asset",
+  {
+    description:
+      "Fetch ONE exported asset (icon/image) from an export by node id and format. `svg` returns inline SVG markup to drop straight into code; `png`/`jpg` return an image block you can SEE. Assets come from nodes the designer marked for Export in Figma — list them via meta.assetReport (populated when a capture/export requested assetFormats). Accepts name:\"latest\".",
+    inputSchema: z.object({
+      name: z.string().min(5).describe('Export basename, or "latest"'),
+      nodeId: z.string().min(1).describe("Asset node id, e.g. 12:345"),
+      format: z.enum(["svg", "png", "jpg", "pdf"]).default("svg"),
+      maxBytes: z.number().int().positive().optional().default(20_000_000),
+    }),
+  },
+  async ({ name, nodeId, format, maxBytes }) => {
+    const res = await loadExport(name, maxBytes);
+    if (!res.ok) {
+      return { ...jsonText(res.error), isError: true };
+    }
+    const assets = (res.data.assets ?? []) as Array<{
+      id: string;
+      name: string;
+      formats: string[];
+      svg?: string;
+      rasterKeys?: Record<string, string>;
+    }>;
+    const asset = assets.find((a) => a.id === nodeId);
+    if (!asset) {
+      return {
+        ...jsonText({
+          error: "asset_not_found",
+          nodeId,
+          available: assets.map((a) => ({
+            id: a.id,
+            name: a.name,
+            formats: a.formats,
+          })),
+        }),
+        isError: true,
+      };
+    }
+    if (format === "svg") {
+      if (typeof asset.svg !== "string") {
+        return {
+          ...jsonText({
+            error: "format_not_exported",
+            nodeId,
+            have: asset.formats,
+          }),
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify({ nodeId, format: "svg", name: asset.name }) },
+          { type: "text" as const, text: asset.svg },
+        ],
+      };
+    }
+    const key = asset.rasterKeys?.[format];
+    const rasters = (res.data.rasters ?? {}) as Record<string, unknown>;
+    const b64 = key ? rasters[key] : undefined;
+    if (typeof b64 !== "string") {
+      return {
+        ...jsonText({ error: "format_not_exported", nodeId, have: asset.formats }),
+        isError: true,
+      };
+    }
+    // PDF has no image block; hand back the base64 with its type instead.
+    if (format === "pdf") {
+      return jsonText({ nodeId, format, name: asset.name, base64: b64, mimeType: "application/pdf" });
+    }
+    const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
+    return {
+      content: [
+        { type: "text" as const, text: JSON.stringify({ nodeId, format, name: asset.name, mimeType }) },
+        { type: "image" as const, data: b64, mimeType },
+      ],
+    };
   },
 );
 
