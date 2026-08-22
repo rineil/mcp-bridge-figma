@@ -12,6 +12,8 @@ import {
   cssTextTransform,
   fitPreviewScale,
   hashString,
+  isIconCandidate,
+  isIconFontFamily,
   resolveTokens,
 } from "./pure";
 
@@ -38,6 +40,9 @@ const TEXT_CAP = 8000;
 // a fat cap here only catches a whole illustration exported by mistake.
 const MAX_ASSETS = 80;
 const MAX_SVG_CHARS = 512 * 1024;
+// "Icons in frame" mode: anything larger than this on either side is layout,
+// not an icon. 64px covers every icon size in a typical design system.
+const MAX_ICON_PX = 64;
 
 type Counter = { n: number; omitted: number };
 
@@ -818,23 +823,71 @@ export type AssetInfo = {
   rasterKeys?: Partial<Record<"png" | "jpg" | "pdf", string>>;
 };
 
+export type AssetMode = "frame" | "icons";
+
 /**
- * Nodes the designer marked for export in Figma's right-panel Export section
- * (`exportSettings` non-empty). This is the "theo figma hiện có" set — the icons
- * and assets already intended for handoff, not every vector we could guess at.
+ * "frame" mode: export each selected root itself as one asset — the user picked
+ * exactly the thing they want a file of.
+ *
+ * "icons" mode: walk inside the selection and detect the icons — designer-marked
+ * nodes, raw vectors, and small icon-shaped containers (vector-only or icon-font
+ * glyphs — this design system draws icons as Font Awesome TEXT). Recursion stops
+ * at a detected icon so its inner vectors don't also export individually.
  */
-function collectAssetTargets(roots: readonly SceneNode[]): SceneNode[] {
+function collectAssetTargets(
+  roots: readonly SceneNode[],
+  mode: AssetMode,
+): SceneNode[] {
+  if (mode === "frame") {
+    return roots.filter((r) => "exportAsync" in r);
+  }
   const out: SceneNode[] = [];
   const seen = new Set<string>();
+
+  const classify = (n: SceneNode): boolean => {
+    let hasVector = false;
+    let hasIconFont = false;
+    let hasPlainText = false;
+    const scan = (x: SceneNode): void => {
+      if (x.type === "VECTOR" || x.type === "BOOLEAN_OPERATION") {
+        hasVector = true;
+      } else if (x.type === "TEXT") {
+        const fam =
+          x.fontName !== figma.mixed ? x.fontName.family : "";
+        if (isIconFontFamily(fam)) {
+          hasIconFont = true;
+        } else {
+          hasPlainText = true;
+        }
+      }
+      if ("children" in x) {
+        for (const c of x.children) {
+          scan(c);
+        }
+      }
+    };
+    scan(n);
+    const b = n.absoluteBoundingBox;
+    return isIconCandidate(
+      {
+        type: n.type,
+        width: b?.width ?? 0,
+        height: b?.height ?? 0,
+        marked: "exportSettings" in n && n.exportSettings.length > 0,
+        hasVectorDescendant: hasVector,
+        hasIconFontText: hasIconFont,
+        hasPlainText,
+        nameHasIcon: /\bicon\b|^ic[-_]/i.test(n.name),
+      },
+      MAX_ICON_PX,
+    );
+  };
+
   const visit = (n: SceneNode): void => {
-    if (
-      "exportSettings" in n &&
-      n.exportSettings.length > 0 &&
-      "exportAsync" in n &&
-      !seen.has(n.id)
-    ) {
+    if ("exportAsync" in n && !seen.has(n.id) && classify(n)) {
       seen.add(n.id);
       out.push(n);
+      return; // an icon's internals are not further icons
     }
     if ("children" in n) {
       for (const c of n.children) {
@@ -854,6 +907,8 @@ export async function buildExportPayload(opts: {
   includeRaster: boolean;
   /** Formats to export designer-marked asset nodes in. Empty = feature off. */
   assetFormats?: AssetFormat[];
+  /** "frame" = export selected roots as-is; "icons" = detect icons inside. */
+  assetMode?: AssetMode;
   maxDepth?: number;
   maxNodes?: number;
 }): Promise<Record<string, unknown>> {
@@ -1011,16 +1066,17 @@ export async function buildExportPayload(opts: {
     }
   }
 
-  // Assets: export the designer-marked nodes in the user's chosen formats.
+  // Assets, in the user's chosen formats. Mode picks the targets: "frame" =
+  // each selected root itself, "icons" = detected icons inside the selection.
   // Independent of phase/raster — an icon sheet is useful even on a phase-1
-  // capture. Each requested format is produced from the same node; Figma's
-  // exportAsync makes any format from any node, so a user ticking PNG gets PNG
-  // even where the node's own Figma preset is SVG.
+  // capture. Figma's exportAsync makes any format from any node, so a user
+  // ticking PNG gets PNG even where the node's own Figma preset is SVG.
   const assets: AssetInfo[] = [];
   const assetSkipped: RasterSkip[] = [];
   const assetFormats = opts.assetFormats ?? [];
+  const assetMode: AssetMode = opts.assetMode ?? "icons";
   if (assetFormats.length > 0) {
-    for (const n of collectAssetTargets(rootsInput)) {
+    for (const n of collectAssetTargets(rootsInput, assetMode)) {
       if (assets.length >= MAX_ASSETS) {
         assetSkipped.push({
           key: n.id,
@@ -1117,6 +1173,7 @@ export async function buildExportPayload(opts: {
   if (assetFormats.length > 0) {
     meta.assetReport = {
       requested: assetFormats,
+      mode: assetMode,
       count: assets.length,
       assets: assets.map((a) => ({
         id: a.id,

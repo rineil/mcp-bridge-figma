@@ -292,6 +292,7 @@ export class LiveChannel implements LiveHandlers {
         assetFormats: Array.isArray(params.assetFormats)
           ? params.assetFormats
           : undefined,
+        assetMode: params.assetMode === "frame" ? "frame" : "icons",
       },
       (body.expectFileKey as string | undefined) ?? undefined,
     );

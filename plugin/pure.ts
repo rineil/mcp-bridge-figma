@@ -739,3 +739,65 @@ export function gateAssetFormats(
   }
   return requested.filter((f) => allowed.indexOf(f) !== -1);
 }
+
+export type IconClassifyInfo = {
+  type: string;
+  width: number;
+  height: number;
+  /** Node has Export settings configured in Figma. */
+  marked: boolean;
+  hasVectorDescendant: boolean;
+  /** TEXT set in an icon font (Font Awesome, Material Icons…) — glyph icons. */
+  hasIconFontText: boolean;
+  /** TEXT in a normal reading font — labels, i.e. NOT an icon. */
+  hasPlainText: boolean;
+  nameHasIcon: boolean;
+};
+
+/**
+ * Whether a node counts as an icon to export on its own in "icons in frame"
+ * mode. A designer-marked node is always in. Otherwise: a raw vector, or a small
+ * container that is icon-shaped — vector-only or icon-font glyphs (this design
+ * system draws its icons as Font Awesome TEXT, not vectors), or named like an
+ * icon — but never one holding plain reading text, which makes it a labelled
+ * control. The size gate stops a whole screen, which also "contains vectors",
+ * from counting as one giant icon.
+ */
+export function isIconCandidate(
+  info: IconClassifyInfo,
+  maxIconPx: number,
+): boolean {
+  if (info.marked) {
+    return true;
+  }
+  if (info.type === "VECTOR" || info.type === "BOOLEAN_OPERATION") {
+    return true;
+  }
+  const container =
+    info.type === "INSTANCE" ||
+    info.type === "COMPONENT" ||
+    info.type === "COMPONENT_SET" ||
+    info.type === "FRAME" ||
+    info.type === "GROUP";
+  if (!container) {
+    return false;
+  }
+  const small = info.width <= maxIconPx && info.height <= maxIconPx;
+  if (!small) {
+    return false;
+  }
+  if (info.hasPlainText) {
+    return false;
+  }
+  if (info.nameHasIcon) {
+    return true;
+  }
+  return info.hasVectorDescendant || info.hasIconFontText;
+}
+
+/** Font families whose TEXT glyphs are really icons, not copy. */
+export function isIconFontFamily(family: string): boolean {
+  return /awesome|material (icons|symbols)|icomoon|fontello|glyphicon|ionicons|feather/i.test(
+    family,
+  );
+}
