@@ -20,6 +20,8 @@ export type LiveParams = {
   phase: 1 | 2 | 3;
   scope: "selection" | "page";
   includeRaster: boolean;
+  /** Formats to export designer-marked asset nodes in; omitted/empty = off. */
+  assetFormats?: Array<"svg" | "png" | "jpg" | "pdf">;
 };
 
 export type LiveCommand = {

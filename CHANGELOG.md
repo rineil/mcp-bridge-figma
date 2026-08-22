@@ -7,6 +7,20 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — export asset (icon/ảnh)
+
+- Plugin có nhóm checkbox **SVG / PNG / JPG / PDF**. Node có **`exportSettings`
+  trong Figma** (designer đã bật Export) được xuất ở các format user tick — đúng
+  "theo figma hiện có". Dùng được cả khi export tay lẫn khi live
+  (`figma_bridge_live_capture` nhận `assetFormats`).
+- Checkbox là **cổng cho phép**, không chỉ mặc định: AI xin PNG mà user chỉ tick
+  SVG thì chỉ SVG ra; bỏ trống hết = không xuất asset nào. Logic gate tách ở
+  `gateAssetFormats` (pure, có test).
+- **`figma_bridge_get_asset {nodeId, format}`**: `svg` trả markup inline (dán
+  thẳng vào code), `png`/`jpg` trả image block. `meta.assetReport` liệt kê asset
+  có sẵn + lý do node bị bỏ. SVG lấy qua `exportAsync({format:"SVG_STRING"})` nên
+  là text đọc được ngay, không phải bytes.
+
 ### Added — kênh live
 
 - **`figma_bridge_live_capture` / `figma_bridge_live_status`**: AI tự lấy dữ liệu

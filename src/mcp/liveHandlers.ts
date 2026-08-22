@@ -289,6 +289,9 @@ export class LiveChannel implements LiveHandlers {
         phase: (params.phase ?? 2) as 1 | 2 | 3,
         scope: params.scope === "page" ? "page" : "selection",
         includeRaster: Boolean(params.includeRaster),
+        assetFormats: Array.isArray(params.assetFormats)
+          ? params.assetFormats
+          : undefined,
       },
       (body.expectFileKey as string | undefined) ?? undefined,
     );

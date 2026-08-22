@@ -718,3 +718,24 @@ export function attachHashes(node: Record<string, unknown>): string {
   node.hash = h;
   return h;
 }
+
+export type AssetFormatName = "svg" | "png" | "jpg" | "pdf";
+
+/**
+ * Effective asset formats for a live capture. The user's checkboxes are a
+ * permission gate, not just a default: nothing is exported that the user has not
+ * ticked, even if the AI asked for it. An AI request narrows within the allowed
+ * set; no request falls back to the user's full standing preference.
+ */
+export function gateAssetFormats(
+  allowed: readonly AssetFormatName[],
+  requested?: readonly AssetFormatName[],
+): AssetFormatName[] {
+  if (allowed.length === 0) {
+    return [];
+  }
+  if (!requested || requested.length === 0) {
+    return [...allowed];
+  }
+  return requested.filter((f) => allowed.indexOf(f) !== -1);
+}

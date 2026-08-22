@@ -148,7 +148,8 @@ Ký tự đầu phải là `{` (không được xuống dòng hay `>` trước �
 | `figma_bridge_read_component` | Đọc **định nghĩa** component theo id (registry phase 3, component **local**) — bản canonical; instance mang `component.overrides` cho phần khác biệt |
 | `figma_bridge_diff_exports` | So **hai export** → `[{id,name,type,change}]`: design đã đổi ở **đâu** kể từ lần sinh code. Bỏ qua nhánh có hash trùng; không tham số thì so export liền trước với `latest` |
 | `figma_bridge_live_status` | Panel Figma **có đang mở không**, đang ở file/page nào. Rẻ, không gọi sang Figma |
-| `figma_bridge_live_capture` | **Lấy export mới ngay từ panel đang mở** — khỏi bấm export tay. Trả về basename để đọc/diff như file thường |
+| `figma_bridge_live_capture` | **Lấy export mới ngay từ panel đang mở** — khỏi bấm export tay. Trả về basename để đọc/diff như file thường. Nhận `assetFormats` để lấy kèm icon/asset |
+| `figma_bridge_get_asset` | Lấy **một asset** theo `nodeId` + `format`: `svg` trả markup inline được, `png`/`jpg` trả image block |
 | `figma_bridge_read_export` | Đọc **nguyên** một file (fallback cho file nhỏ) |
 | `figma_bridge_export_schema_hint` | Mô tả nhanh các phase + gợi ý schema |
 
@@ -195,6 +196,16 @@ Kết quả được ghi thành **file export bình thường**, nên mọi tool
 > **Nhiều client cùng lúc vẫn dùng được.** Mỗi client spawn một tiến trình MCP riêng nhưng chỉ một chiếm được cổng; các tiến trình còn lại **tự chuyển tiếp** yêu cầu sang tiến trình đó qua chính HTTP có token, nên bạn không phải nhớ client nào đang giữ cổng. Tiến trình thua cũng thử bind lại mỗi 5s để tự lành khi cổng được nhả.
 >
 > **Cổng mặc định đổi thành 3846** (3845 là cổng Figma Dev Mode MCP, rất dễ đụng).
+
+### Tự export icon/asset từ Figma
+
+Trong plugin có nhóm checkbox **SVG / PNG / JPG / PDF** — bạn tick format nào thì **cho phép** MCP lấy asset ở format đó (bỏ trống = không lấy). Nguồn asset là các node **designer đã bật Export** trong panel Figma (`exportSettings`) — đúng "theo figma hiện có", không đoán bừa.
+
+Khi live, AI gọi `figma_bridge_live_capture` với `assetFormats: ["svg"]` (hoặc export tay có tick), plugin xuất mọi icon đã đánh dấu. Rồi:
+- `meta.assetReport` liệt kê `[{id,name,formats}]`.
+- `figma_bridge_get_asset {nodeId, format}` lấy một cái: **SVG trả markup inline thẳng vào code**, PNG/JPG trả image block để nhìn.
+
+> ⚠️ Checkbox của bạn là **cổng cho phép**: AI yêu cầu PNG nhưng bạn chỉ tick SVG thì chỉ SVG ra. Bỏ trống hết = MCP không lấy asset nào, dù AI có xin.
 
 ### Biết design đã đổi ở đâu
 
