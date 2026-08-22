@@ -532,6 +532,9 @@ const html = `
       document.querySelectorAll(".af").forEach((c) => { c.checked = af.indexOf(c.value) !== -1; });
       $("assetMode").value = af.length === 0 ? "off" : (m.assetMode === "frame" ? "frame" : "icons");
       syncAssetUi();
+      // Main thread already restarted the loop when liveEnabled was stored; the
+      // checkbox just needs to reflect it (liveStatus messages fill in the rest).
+      $("live").checked = !!m.liveEnabled;
       doPing();
       return;
     }
@@ -589,6 +592,7 @@ void (async () => {
   const includeRaster = (await get("includeRaster")) as boolean | undefined;
   const savedFormats = (await get("assetFormats")) as AssetFormat[] | undefined;
   const savedMode = (await get("assetMode")) as AssetMode | undefined;
+  const liveEnabled = (await get("liveEnabled")) as boolean | undefined;
   // Seed the allowlist before the UI can toggle Live, so a capture arriving
   // immediately after the panel opens honours the stored preference.
   assetPrefs.allowed = Array.isArray(savedFormats) ? savedFormats : [];
@@ -602,5 +606,11 @@ void (async () => {
     includeRaster: includeRaster === true,
     assetFormats: assetPrefs.allowed,
     assetMode: assetPrefs.mode,
+    liveEnabled: liveEnabled === true,
   });
+  // Live survives a panel reopen: the user opted in once, and having to re-tick
+  // the box every time the panel opens was friction they hit on every session.
+  if (liveEnabled === true && typeof url === "string" && url) {
+    startLive(url.replace(/\/$/, ""), typeof token === "string" ? token : "");
+  }
 })();

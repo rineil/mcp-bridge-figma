@@ -767,11 +767,24 @@ export function isIconCandidate(
   info: IconClassifyInfo,
   maxIconPx: number,
 ): boolean {
+  const small = info.width <= maxIconPx && info.height <= maxIconPx;
+  // Designer-marked nodes are assets by explicit intent — but only within a
+  // sane size for icons mode. A user who once ticked Export on a whole SCREEN
+  // frame would otherwise have that frame classified as "the icon" at the walk's
+  // first step, stopping recursion before any real icon inside is ever seen
+  // (observed in practice: one 15MB SVG skipped, zero icons found). Oversized
+  // marked nodes are treated as containers to descend into instead.
   if (info.marked) {
-    return true;
+    return info.width <= 4 * maxIconPx && info.height <= 4 * maxIconPx;
   }
   if (info.type === "VECTOR" || info.type === "BOOLEAN_OPERATION") {
     return true;
+  }
+  // A bare TEXT glyph in an icon font IS the icon in icon-font design systems —
+  // there is no vector or wrapper to detect. Must be purely glyph text: mixed
+  // or reading-font text is a label.
+  if (info.type === "TEXT") {
+    return small && info.hasIconFontText && !info.hasPlainText;
   }
   const container =
     info.type === "INSTANCE" ||
@@ -782,7 +795,6 @@ export function isIconCandidate(
   if (!container) {
     return false;
   }
-  const small = info.width <= maxIconPx && info.height <= maxIconPx;
   if (!small) {
     return false;
   }
