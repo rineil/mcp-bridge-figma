@@ -163,3 +163,98 @@ export function componentInventory(
   }
   return [...byId.values()].sort((a, b) => b.count - a.count);
 }
+
+export type NodeChange = {
+  id: string;
+  name: string;
+  type: string;
+  change: "added" | "removed" | "modified";
+};
+
+/**
+ * Compare two exports by their per-node Merkle `hash`. Because a node's hash
+ * covers its descendants, an unchanged hash prunes that whole subtree — so this
+ * walks only the parts that actually moved.
+ *
+ * "modified" is reported for the shallowest node whose own fields changed; a
+ * node whose hash differs only because a descendant changed is not itself
+ * listed, keeping the result to real edit sites rather than every ancestor.
+ */
+export function diffTrees(
+  before: ExportNode[],
+  after: ExportNode[],
+): NodeChange[] {
+  const out: NodeChange[] = [];
+  const describe = (n: ExportNode): Omit<NodeChange, "change"> => ({
+    id: String(n.id ?? ""),
+    name: String(n.name ?? ""),
+    type: String(n.type ?? ""),
+  });
+
+  const markAll = (nodes: ExportNode[], change: "added" | "removed"): void => {
+    for (const n of nodes) {
+      out.push({ ...describe(n), change });
+    }
+  };
+
+  const walk = (a: ExportNode[], b: ExportNode[]): void => {
+    const byId = new Map<string, ExportNode>();
+    for (const n of a) {
+      byId.set(String(n.id ?? ""), n);
+    }
+    const seen = new Set<string>();
+    for (const nb of b) {
+      const id = String(nb.id ?? "");
+      seen.add(id);
+      const na = byId.get(id);
+      if (!na) {
+        out.push({ ...describe(nb), change: "added" });
+        continue;
+      }
+      // Identical subtree — nothing below can differ, so stop descending.
+      if (na.hash && nb.hash && na.hash === nb.hash) {
+        continue;
+      }
+      // Own-field digest: strip children/hash the same way the plugin does.
+      const ownA = ownDigest(na);
+      const ownB = ownDigest(nb);
+      if (ownA !== ownB) {
+        out.push({ ...describe(nb), change: "modified" });
+      }
+      walk(nodeChildren(na), nodeChildren(nb));
+    }
+    for (const [id, na] of byId) {
+      if (!seen.has(id)) {
+        markAll([na], "removed");
+      }
+    }
+  };
+
+  walk(before, after);
+  return out;
+}
+
+/** Stable digest of a node's own fields, excluding `children` and `hash`. */
+function ownDigest(n: ExportNode): string {
+  const rest: Record<string, unknown> = {};
+  for (const k of Object.keys(n)) {
+    if (k !== "children" && k !== "hash") {
+      rest[k] = (n as Record<string, unknown>)[k];
+    }
+  }
+  return stableKeyStringify(rest);
+}
+
+function stableKeyStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableKeyStringify).join(",")}]`;
+  }
+  const o = value as Record<string, unknown>;
+  return `{${Object.keys(o)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableKeyStringify(o[k])}`)
+    .join(",")}}`;
+}

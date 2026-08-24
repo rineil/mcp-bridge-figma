@@ -9,6 +9,120 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Chưa có thay đổi chưa phát hành._
 
+## [0.8.0] - 2026-08-22
+
+Vòng lặp design-to-code khép kín: kênh live cho AI tự lấy dữ liệu, ảnh render
+để tự đối chiếu, hash để biết design đổi ở đâu, và export icon theo frame.
+Phiên bản: plugin `0.8.0`.
+
+### Added — chế độ export asset (frame / icon-trong-frame)
+
+- Select **Export asset** trong plugin: *Icon trong frame* (mặc định) tự detect
+  icon bên trong selection; *Cả frame* xuất chính selection thành 1 file. Format
+  chỉ hiện khi bật. Lần đầu dùng thực tế lộ đúng lỗ hổng: chọn frame 1920px có
+  Export settings → export cả frame thành SVG 15MB bị cap chặn, còn icon con thì
+  không ra cái nào.
+- Detect icon (`isIconCandidate`, pure + test): node đánh dấu Export, VECTOR /
+  BOOLEAN_OPERATION, container ≤64px chỉ chứa vector **hoặc glyph icon-font**
+  (Font Awesome, Material Icons… — design system này vẽ icon bằng TEXT Font
+  Awesome, không phải vector) và không chứa text thường. Dừng ở icon đã nhận —
+  ruột icon không export lẻ.
+- `assetMode` luồng qua UI → clientStorage → live command → MCP tool → proxy.
+  Chế độ trong panel là lựa chọn của user; AI chỉ gợi ý khi user chưa đặt.
+
+### Added — export asset (icon/ảnh)
+
+- Plugin có nhóm checkbox **SVG / PNG / JPG / PDF**. Node có **`exportSettings`
+  trong Figma** (designer đã bật Export) được xuất ở các format user tick — đúng
+  "theo figma hiện có". Dùng được cả khi export tay lẫn khi live
+  (`figma_bridge_live_capture` nhận `assetFormats`).
+- Checkbox là **cổng cho phép**, không chỉ mặc định: AI xin PNG mà user chỉ tick
+  SVG thì chỉ SVG ra; bỏ trống hết = không xuất asset nào. Logic gate tách ở
+  `gateAssetFormats` (pure, có test).
+- **`figma_bridge_get_asset {nodeId, format}`**: `svg` trả markup inline (dán
+  thẳng vào code), `png`/`jpg` trả image block. `meta.assetReport` liệt kê asset
+  có sẵn + lý do node bị bỏ. SVG lấy qua `exportAsync({format:"SVG_STRING"})` nên
+  là text đọc được ngay, không phải bytes.
+
+### Added — kênh live
+
+- **`figma_bridge_live_capture` / `figma_bridge_live_status`**: AI tự lấy dữ liệu
+  mới từ panel Figma đang mở, khỏi bấm export tay. Kết quả ghi thành file export
+  bình thường nên mọi tool đọc sẵn có dùng lại được nguyên vẹn.
+- Kênh ngược `POST /poll` + `POST /result` trên bridge **nhúng trong tiến trình
+  MCP** (hàng đợi là biến in-memory, không IPC). Máy trạng thái tách riêng ở
+  `src/shared/liveChannel.ts` để test được không cần socket.
+
+### Changed
+
+- **Cổng mặc định `3845` → `3846`.** 3845 là cổng Figma Dev Mode MCP — đụng độ là
+  trạng thái mặc định với đúng nhóm dùng tool này. Manifest whitelist cả hai.
+- **Token gate chuyển sang default-deny, đặt ở đầu router.** Trước đây `tokenOk`
+  chỉ được gọi trong nhánh `/export`, mà template gần nhất để copy lại là
+  `/health` *không* chặn — endpoint mới rất dễ vô tình để hở. `/result` hở nghĩa
+  là tiến trình lạ bơm được design giả vào agent đang sinh code.
+- `GET /health` trả thêm tóm tắt trạng thái live.
+
+### Notes — giới hạn đã biết
+
+- **Figma không chạy plugin ở nền.** Panel phải mở trong đúng file; AI không
+  đánh thức Figma được. `live_status` cho biết ngay thay vì chờ timeout.
+- Sandbox `fetch` **không huỷ được** (`FetchOptions` không có `signal`), nên vòng
+  poll dùng self-scheduling + generation counter thay cho `setInterval` +
+  AbortController.
+- Poll rỗng phải trả **200 kèm body**: `FetchResponse` không có `.body`, và
+  `json()` trên 204 rỗng sẽ ném lỗi làm chết vòng lặp ngay tick đầu.
+- **Server chưa tự xác thực với plugin.** Tiến trình chiếm cổng trước sẽ nhận
+  token và toàn bộ payload. Cần HMAC-SHA256 (sandbox không có `SubtleCrypto`) —
+  chưa làm, không nên coi là đã vá.
+
+### Added — ảnh render & phát hiện design đổi
+
+- **Ảnh render từng màn (phase 3 + raster)**: trước đây chỉ render node
+  `≤ 400×400` nên **không màn hình thật nào** lọt qua. Nay fit theo **cả hai
+  chiều** về `MAX_PREVIEW_PX` (1600), cho up-scale ≤ 2× với node nhỏ, tự hạ scale
+  và thử lại khi PNG vượt trần. Container SECTION/GROUP được render theo **từng
+  frame con** (1 ảnh/màn) thay vì một ảnh khổng lồ. Lấy qua
+  `figma_bridge_get_raster` — trả về image block nên agent **nhìn thấy** để đối
+  chiếu với code nó vừa sinh.
+- **`meta.rasterReport`**: `previews[]` (id/name/kích thước/bytes), `imageCount`,
+  và `skipped[{key,name,reason}]`. Trước đây ảnh vượt trần bị bỏ **âm thầm**,
+  khiến "quá cỡ" trông y hệt "thiết kế không có ảnh".
+- **Hash Merkle mỗi node** + `meta.contentHash` / `meta.rootHashes`. Hash của một
+  node phủ cả cây con, nên sửa sâu làm đổi hash node đó **và mọi tổ tiên**, trong
+  khi nhánh không đổi giữ nguyên hash.
+- **Tool `figma_bridge_diff_exports`**: so hai export, trả
+  `[{id,name,type,change}]`. Bỏ qua nguyên nhánh có hash trùng và chỉ báo node
+  **thực sự** bị sửa (không kể tổ tiên bị đổi hash lây). Không tham số thì so
+  export liền trước với `latest`. Export cũ chưa có hash vẫn diff được
+  (`hashed:false`).
+
+### Changed — payload & giới hạn
+
+- **Trần ảnh nhúng** `512KB` → `4MB` (base64 phồng ~33%, tối đa 12 ảnh nên vẫn
+  nằm trong trần body 64MB của bridge). Ảnh hero cỡ thật trước đây luôn bị loại.
+- **`DEFAULT_MAX_NODES`** `8000` → `20000`; một màn 8261 node từng bị cắt mất 6 node.
+- **Payload gọn hơn ~22%** (đo trên export thật 11.69 MB), không mất dữ liệu:
+  - `text.segments` chỉ xuất khi có **>1 run** hoặc có hyperlink. 3129/3131 node
+    text chỉ có đúng 1 run lặp lại y nguyên các trường cấp node (đã đối chiếu
+    từng trường: 0 sai khác; `segment.fills` là bản nghèo hơn của `node.fills`,
+    vốn đã có `cssColor` + `tokens`). Tiết kiệm ~1.9 MB.
+  - `layoutSelf` bỏ giá trị mặc định của Figma: `constraints` MIN/MIN,
+    `layoutAlign` INHERIT, `layoutGrow` 0. Đọc thiếu khoá = mặc định. ~0.66 MB.
+
+### Fixed
+
+- Nhãn checkbox raster ghi "tối đa 5 layer gốc" trong khi trần thật là 8 màn +
+  12 ảnh nhúng.
+
+### Notes
+
+- **Không** nén `tokens` nhúng trong paint (0.77 MB, lặp ~96 lần/token) dù rất
+  cám dỗ: 5/46 token là biến thư viện **remote** không có trong bảng `variables`,
+  paint bind qua **alias** có thể không mang màu riêng (`tokens.cssColor` là nơi
+  duy nhất có màu đã resolve), và biến non-color chỉ có giá trị trong `value`.
+  Đổi ~5% dung lượng lấy nguy cơ mất dữ liệu âm thầm là không đáng.
+
 ## [0.7.0] - 2026-06-23
 
 Hoàn tất phần "nặng" của dedup component + codegen. Phiên bản: plugin `0.7.0`, MCP server `0.9.0`.

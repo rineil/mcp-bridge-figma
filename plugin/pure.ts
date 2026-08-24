@@ -535,6 +535,11 @@ export function resolveTokens(
           referenced.add(ref);
           const v = varsById.get(ref);
           const r = resolveVar(ref, varsById, colsById);
+          // Deliberately NOT compacted to a bare {id,name}: a paint bound to an
+          // alias may carry no colour of its own (cssColor here is the only
+          // resolved value), non-colour variables live in `value` alone, and
+          // remote library variables never reach the top-level table at all.
+          // Trimming this saved ~5% of a real export and risked silent loss.
           tokens[field] = {
             id: ref,
             name: v?.name,
@@ -646,4 +651,180 @@ export function collectImageHashes(roots: unknown[]): string[] {
     visit(r);
   }
   return [...out];
+}
+
+/**
+ * Scale for a visual-reference PNG render. Fits the node inside `maxPx` on BOTH
+ * axes — bounding width alone lets a very tall frame through — and never
+ * upscales past `maxScale`, since extra pixels beyond that only cost bytes.
+ * Returns 0 for a degenerate box so callers can skip instead of exporting junk.
+ */
+export function fitPreviewScale(
+  width: number,
+  height: number,
+  maxPx: number,
+  maxScale: number,
+): number {
+  if (!(width > 0) || !(height > 0)) {
+    return 0;
+  }
+  return Math.min(maxPx / width, maxPx / height, maxScale);
+}
+
+/** FNV-1a over a string -> 8 hex chars. No crypto in the Figma sandbox. */
+export function hashString(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    // 32-bit FNV prime multiply, kept in range without BigInt.
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/**
+ * Key order must not change a hash, or an unrelated serializer tweak would look
+ * like a design edit. Sorts object keys; arrays keep order (it is meaningful for
+ * children and paints).
+ */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  const o = value as Record<string, unknown>;
+  const keys = Object.keys(o).sort();
+  return `{${keys
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`)
+    .join(",")}}`;
+}
+
+/**
+ * Merkle-hash a serialized node tree in place: every node gets `hash` covering
+ * its own fields plus its children's hashes, so a deep edit changes the hash of
+ * that node AND of each ancestor. That is what lets a diff walk from the root
+ * straight to what actually moved, instead of re-reading the whole export.
+ * `hash` and `children` are excluded from a node's own digest.
+ */
+export function attachHashes(node: Record<string, unknown>): string {
+  const kids = Array.isArray(node.children)
+    ? (node.children as Record<string, unknown>[])
+    : [];
+  const childHashes = kids.map((c) => attachHashes(c));
+  const { hash: _ignored, children: _kids, ...own } = node;
+  const h = hashString(stableStringify(own) + childHashes.join(""));
+  node.hash = h;
+  return h;
+}
+
+export type AssetFormatName = "svg" | "png" | "jpg" | "pdf";
+
+/**
+ * Effective asset formats for a live capture. The user's checkboxes are a
+ * permission gate, not just a default: nothing is exported that the user has not
+ * ticked, even if the AI asked for it. An AI request narrows within the allowed
+ * set; no request falls back to the user's full standing preference.
+ */
+export function gateAssetFormats(
+  allowed: readonly AssetFormatName[],
+  requested?: readonly AssetFormatName[],
+): AssetFormatName[] {
+  if (allowed.length === 0) {
+    return [];
+  }
+  if (!requested || requested.length === 0) {
+    return [...allowed];
+  }
+  return requested.filter((f) => allowed.indexOf(f) !== -1);
+}
+
+export type IconClassifyInfo = {
+  type: string;
+  width: number;
+  height: number;
+  /** Node has Export settings configured in Figma. */
+  marked: boolean;
+  hasVectorDescendant: boolean;
+  /** TEXT set in an icon font (Font Awesome, Material Icons…) — glyph icons. */
+  hasIconFontText: boolean;
+  /** TEXT in a normal reading font — labels, i.e. NOT an icon. */
+  hasPlainText: boolean;
+  nameHasIcon: boolean;
+};
+
+/**
+ * Whether a node counts as an icon to export on its own in "icons in frame"
+ * mode. A designer-marked node is always in. Otherwise: a raw vector, or a small
+ * container that is icon-shaped — vector-only or icon-font glyphs (this design
+ * system draws its icons as Font Awesome TEXT, not vectors), or named like an
+ * icon — but never one holding plain reading text, which makes it a labelled
+ * control. The size gate stops a whole screen, which also "contains vectors",
+ * from counting as one giant icon.
+ */
+export function isIconCandidate(
+  info: IconClassifyInfo,
+  maxIconPx: number,
+): boolean {
+  const small = info.width <= maxIconPx && info.height <= maxIconPx;
+  // Designer-marked nodes are assets by explicit intent — but only within a
+  // sane size for icons mode. A user who once ticked Export on a whole SCREEN
+  // frame would otherwise have that frame classified as "the icon" at the walk's
+  // first step, stopping recursion before any real icon inside is ever seen
+  // (observed in practice: one 15MB SVG skipped, zero icons found). Oversized
+  // marked nodes are treated as containers to descend into instead.
+  if (info.marked) {
+    return info.width <= 4 * maxIconPx && info.height <= 4 * maxIconPx;
+  }
+  if (info.type === "VECTOR" || info.type === "BOOLEAN_OPERATION") {
+    return true;
+  }
+  // A bare TEXT glyph in an icon font IS the icon in icon-font design systems —
+  // there is no vector or wrapper to detect. Must be purely glyph text: mixed
+  // or reading-font text is a label.
+  if (info.type === "TEXT") {
+    return small && info.hasIconFontText && !info.hasPlainText;
+  }
+  const container =
+    info.type === "INSTANCE" ||
+    info.type === "COMPONENT" ||
+    info.type === "COMPONENT_SET" ||
+    info.type === "FRAME" ||
+    info.type === "GROUP";
+  if (!container) {
+    return false;
+  }
+  if (!small) {
+    return false;
+  }
+  if (info.hasPlainText) {
+    return false;
+  }
+  if (info.nameHasIcon) {
+    return true;
+  }
+  return info.hasVectorDescendant || info.hasIconFontText;
+}
+
+/** Font families whose TEXT glyphs are really icons, not copy. */
+export function isIconFontFamily(family: string): boolean {
+  return /awesome|material (icons|symbols)|icomoon|fontello|glyphicon|ionicons|feather/i.test(
+    family,
+  );
+}
+
+/**
+ * Identity of an asset by exported CONTENT, not by source component. Two
+ * instances of one component can render differently (colour overrides), and two
+ * unrelated nodes can render identically — only the bytes decide. Formats are
+ * sorted so key order never depends on request order.
+ */
+export function assetContentKey(
+  parts: ReadonlyArray<readonly [format: string, content: string]>,
+): string {
+  return [...parts]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([fmt, content]) => `${fmt}:${hashString(content)}`)
+    .join("|");
 }

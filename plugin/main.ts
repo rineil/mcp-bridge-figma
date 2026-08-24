@@ -2,9 +2,13 @@
 
 import {
   buildExportPayload,
+  PLUGIN_VERSION,
+  type AssetFormat,
+  type AssetMode,
   type ExportPhase,
   type ExportScope,
 } from "./serialize";
+import { gateAssetFormats } from "./pure";
 
 type ExportMsg = {
   type: "export";
@@ -13,9 +17,190 @@ type ExportMsg = {
   bridgeUrl: string;
   token: string;
   includeRaster: boolean;
+  assetFormats: AssetFormat[];
+  assetMode: AssetMode;
 };
 type PingMsg = { type: "ping"; bridgeUrl: string; token: string };
-type UiMessage = ExportMsg | PingMsg;
+type LiveMsg = {
+  type: "live";
+  enabled: boolean;
+  bridgeUrl: string;
+  token: string;
+  assetFormats: AssetFormat[];
+  assetMode: AssetMode;
+};
+/** User's asset allowlist + mode, updated whenever a control changes. */
+type AssetPrefsMsg = {
+  type: "assetPrefs";
+  assetFormats: AssetFormat[];
+  assetMode: AssetMode;
+};
+type UiMessage = ExportMsg | PingMsg | LiveMsg | AssetPrefsMsg;
+
+/**
+ * What the USER permits the MCP to export as assets. The AI's live_capture can
+ * request formats, but nothing is produced that the user has not ticked — the
+ * checkboxes are a permission gate, not just a default.
+ */
+const assetPrefs: { allowed: AssetFormat[]; mode: AssetMode } = {
+  allowed: [],
+  mode: "icons",
+};
+
+type LiveCommand = {
+  id: string;
+  op: string;
+  params: {
+    phase: ExportPhase;
+    scope: ExportScope;
+    includeRaster: boolean;
+    assetFormats?: AssetFormat[];
+    assetMode?: AssetMode;
+  };
+};
+
+/**
+ * Live channel: the bridge cannot reach into Figma, so the panel asks it for
+ * work. Bumping the generation cancels the running loop — sandbox `fetch` has
+ * no `signal` (FetchOptions carries no AbortController), so an in-flight poll
+ * cannot be aborted and is instead ignored on arrival.
+ *
+ * Self-scheduling rather than setInterval: a slow poll must not let ticks stack
+ * up behind it.
+ */
+const liveLoop: { generation: number; running: boolean; sessionId?: string } = {
+  generation: 0,
+  running: false,
+};
+
+function liveStatusToUi(state: string, detail?: string): void {
+  figma.ui.postMessage({ type: "liveStatus", state, detail });
+}
+
+async function runLiveCommand(
+  cmd: LiveCommand,
+): Promise<{ ok: true; payload: unknown } | { ok: false; error: string }> {
+  try {
+    const payload = await buildExportPayload({
+      phase: cmd.params.phase,
+      scope: cmd.params.scope,
+      includeRaster: cmd.params.includeRaster,
+      assetFormats: gateAssetFormats(assetPrefs.allowed, cmd.params.assetFormats),
+      // The AI may suggest a mode, but the panel's select is the user's call.
+      assetMode: cmd.params.assetMode ?? assetPrefs.mode,
+    });
+    return { ok: true, payload };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+async function liveTick(base: string, token: string, gen: number): Promise<void> {
+  if (gen !== liveLoop.generation) {
+    return;
+  }
+  let delay = 500;
+  try {
+    const res = await fetch(`${base}/poll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bridge-Token": token },
+      body: JSON.stringify({
+        sessionId: liveLoop.sessionId,
+        pluginVersion: PLUGIN_VERSION,
+        // Re-read identity every poll so the server notices a file/page switch
+        // instead of answering confidently about the wrong document.
+        fileKey: figma.fileKey ?? null,
+        fileName: figma.root.name,
+        pageId: figma.currentPage.id,
+        pageName: figma.currentPage.name,
+        selectionCount: figma.currentPage.selection.length,
+      }),
+    });
+    if (gen !== liveLoop.generation) {
+      return;
+    }
+    if (res.status === 401) {
+      liveLoop.running = false;
+      liveStatusToUi("error", "Token sai — kiểm tra lại Bridge token.");
+      return;
+    }
+    if (res.status === 404) {
+      // /health answered but /poll is missing: this bridge has no live channel.
+      // Almost always a standalone `pnpm bridge` instead of the MCP-embedded one.
+      // Terminal, not retryable — stop and tell the user how to fix it.
+      liveLoop.running = false;
+      liveStatusToUi(
+        "error",
+        "Bridge này không hỗ trợ live. Live cần bridge nhúng trong MCP server, không phải `pnpm bridge`. Tắt `pnpm bridge` và trỏ plugin tới cổng MCP (mặc định 3846).",
+      );
+      return;
+    }
+    if (!res.ok) {
+      liveStatusToUi("retrying", `Bridge trả ${res.status}`);
+      delay = 3000;
+    } else {
+      // The server always sends a JSON body, including when idle: FetchResponse
+      // has no `.body` to test and `json()` on an empty 204 would throw here and
+      // kill the loop on its first idle tick.
+      const data = (await res.json()) as {
+        sessionId?: string;
+        commands?: LiveCommand[];
+      };
+      if (data.sessionId) {
+        liveLoop.sessionId = data.sessionId;
+      }
+      const commands = data.commands ?? [];
+      liveStatusToUi(commands.length ? "working" : "connected");
+      for (const cmd of commands) {
+        const out = await runLiveCommand(cmd);
+        if (gen !== liveLoop.generation) {
+          return;
+        }
+        await fetch(`${base}/result`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Bridge-Token": token,
+          },
+          body: JSON.stringify({
+            sessionId: liveLoop.sessionId,
+            requestId: cmd.id,
+            ok: out.ok,
+            error: out.ok ? undefined : out.error,
+            payload: out.ok ? out.payload : undefined,
+          }),
+        });
+      }
+      if (commands.length > 0) {
+        liveStatusToUi("connected");
+        delay = 0; // more may be queued
+      }
+    }
+  } catch (e) {
+    liveStatusToUi("retrying", e instanceof Error ? e.message : String(e));
+    delay = 3000;
+  }
+  if (gen !== liveLoop.generation) {
+    return;
+  }
+  setTimeout(() => {
+    void liveTick(base, token, gen);
+  }, delay);
+}
+
+function startLive(base: string, token: string): void {
+  liveLoop.generation++;
+  liveLoop.running = true;
+  liveLoop.sessionId = undefined;
+  liveStatusToUi("connecting");
+  void liveTick(base, token, liveLoop.generation);
+}
+
+function stopLive(): void {
+  liveLoop.generation++; // orphans any in-flight poll
+  liveLoop.running = false;
+  liveStatusToUi("off");
+}
 
 async function pingHealth(
   base: string,
@@ -23,7 +208,24 @@ async function pingHealth(
   try {
     const res = await fetch(`${base}/health`);
     if (res.ok) {
-      return { ok: true, status: res.status, message: "Bridge OK" };
+      // /health reports whether this bridge carries the live channel (an object)
+      // or is ingest-only (`live: null`). Surfacing it here means "check
+      // connection" tells the truth up front, instead of the user ticking Live
+      // and hitting a 404 against a bridge that answered /health perfectly.
+      let liveSupported = false;
+      try {
+        const body = (await res.json()) as { live?: unknown };
+        liveSupported = body.live !== null && body.live !== undefined;
+      } catch {
+        /* older bridge without the field */
+      }
+      return {
+        ok: true,
+        status: res.status,
+        message: liveSupported
+          ? "Bridge OK · live sẵn sàng"
+          : "Bridge OK · bridge này KHÔNG hỗ trợ live (dùng MCP server, không phải `pnpm bridge`)",
+      };
     }
     return { ok: false, status: res.status, message: `Bridge lỗi (${res.status})` };
   } catch {
@@ -41,9 +243,31 @@ async function saveSettings(msg: ExportMsg): Promise<void> {
   await figma.clientStorage.setAsync("phase", msg.phase);
   await figma.clientStorage.setAsync("scope", msg.scope);
   await figma.clientStorage.setAsync("includeRaster", msg.includeRaster);
+  await figma.clientStorage.setAsync("assetFormats", msg.assetFormats);
+  await figma.clientStorage.setAsync("assetMode", msg.assetMode);
 }
 
 figma.ui.onmessage = async (msg: UiMessage) => {
+  if (msg.type === "assetPrefs") {
+    assetPrefs.allowed = msg.assetFormats;
+    assetPrefs.mode = msg.assetMode;
+    await figma.clientStorage.setAsync("assetFormats", msg.assetFormats);
+    await figma.clientStorage.setAsync("assetMode", msg.assetMode);
+    return;
+  }
+  if (msg.type === "live") {
+    assetPrefs.allowed = msg.assetFormats;
+    assetPrefs.mode = msg.assetMode;
+    await figma.clientStorage.setAsync("assetFormats", msg.assetFormats);
+    await figma.clientStorage.setAsync("assetMode", msg.assetMode);
+    await figma.clientStorage.setAsync("liveEnabled", msg.enabled);
+    if (msg.enabled) {
+      startLive(msg.bridgeUrl.replace(/\/$/, ""), msg.token ?? "");
+    } else {
+      stopLive();
+    }
+    return;
+  }
   if (msg.type === "ping") {
     const base = msg.bridgeUrl.replace(/\/$/, "");
     const h = await pingHealth(base);
@@ -76,6 +300,8 @@ figma.ui.onmessage = async (msg: UiMessage) => {
       phase: msg.phase,
       scope: msg.scope,
       includeRaster: Boolean(msg.includeRaster),
+      assetFormats: msg.assetFormats,
+      assetMode: msg.assetMode,
     });
     const res = await fetch(`${base}/export`, {
       method: "POST",
@@ -100,6 +326,11 @@ figma.ui.onmessage = async (msg: UiMessage) => {
       typeof meta.omittedCount === "number" ? meta.omittedCount : 0;
     const nodes = typeof meta.nodeCount === "number" ? meta.nodeCount : 0;
     const maxNodes = typeof meta.maxNodes === "number" ? meta.maxNodes : 0;
+    const rr = (meta.rasterReport ?? {}) as {
+      previews?: unknown[];
+      imageCount?: number;
+      skipped?: unknown[];
+    };
     const summary = res.ok
       ? {
           basename: saved.split("/").pop() ?? "",
@@ -110,6 +341,9 @@ figma.ui.onmessage = async (msg: UiMessage) => {
           scope: msg.scope,
           bytes: typeof reply.bytes === "number" ? reply.bytes : 0,
           truncated: omitted > 0 || (maxNodes > 0 && nodes >= maxNodes),
+          previews: Array.isArray(rr.previews) ? rr.previews.length : 0,
+          images: typeof rr.imageCount === "number" ? rr.imageCount : 0,
+          rasterSkipped: Array.isArray(rr.skipped) ? rr.skipped.length : 0,
         }
       : undefined;
 
@@ -164,7 +398,7 @@ const html = `
 </style>
 <span id="pill" class="pill"><span class="dot"></span><span id="pillText">Chưa kiểm tra</span></span>
 <label>Bridge URL</label>
-<input id="url" value="http://localhost:3845" />
+<input id="url" value="http://localhost:3846" />
 <label>Bridge token</label>
 <input id="token" placeholder="dán token in ở terminal" />
 <div class="hint">Lấy từ dòng "[figma-bridge] token: …" khi chạy pnpm bridge (lưu lại tự động)</div>
@@ -183,9 +417,31 @@ const html = `
 </select>
 <div class="row">
   <input type="checkbox" id="raster" style="width:auto;margin:0" />
-  <label for="raster" style="margin:0;font-weight:500">PNG preview (phase 3, tối đa 5 layer gốc)</label>
+  <label for="raster" style="margin:0;font-weight:500">PNG preview (phase 3, tối đa 8 màn + 12 ảnh nhúng)</label>
 </div>
 <button id="run">Export → bridge</button>
+<div style="margin-top:12px">
+  <label style="margin-bottom:4px">Export asset</label>
+  <select id="assetMode">
+    <option value="off" selected>Không xuất asset</option>
+    <option value="icons">Icon trong frame — tự detect icon bên trong selection</option>
+    <option value="frame">Cả frame — xuất chính selection thành 1 file</option>
+  </select>
+  <div id="assetFormats" style="display:none">
+    <div class="row" style="flex-wrap:wrap;gap:4px 14px;margin-bottom:2px">
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_svg" value="svg" style="width:auto;margin:0" /><label for="af_svg" style="margin:0;font-weight:500">SVG</label></span>
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_png" value="png" style="width:auto;margin:0" /><label for="af_png" style="margin:0;font-weight:500">PNG</label></span>
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_jpg" value="jpg" style="width:auto;margin:0" /><label for="af_jpg" style="margin:0;font-weight:500">JPG</label></span>
+      <span style="display:flex;align-items:center;gap:5px"><input type="checkbox" class="af" id="af_pdf" value="pdf" style="width:auto;margin:0" /><label for="af_pdf" style="margin:0;font-weight:500">PDF</label></span>
+    </div>
+    <div class="hint" id="assetHint"></div>
+  </div>
+</div>
+<div class="row" style="margin-top:6px;border-top:1px solid rgba(128,128,128,.25);padding-top:10px">
+  <input type="checkbox" id="live" style="width:auto;margin:0" />
+  <label for="live" style="margin:0;font-weight:500">Chế độ live — cho AI tự lấy dữ liệu</label>
+</div>
+<div class="log" id="liveLog">Tắt. Bật để Cursor/Claude gọi figma_bridge_live_capture mà bạn không phải bấm export. Panel phải mở.</div>
 <div class="log" id="log"></div>
 <script>
   const $ = (id) => document.getElementById(id);
@@ -197,6 +453,24 @@ const html = `
   }
   function fmtKB(b) { return b ? (b / 1024).toFixed(1) + " KB" : "?"; }
 
+  function assetFormats() {
+    if ($("assetMode").value === "off") return [];
+    const out = [];
+    document.querySelectorAll(".af").forEach((c) => { if (c.checked) out.push(c.value); });
+    return out;
+  }
+  function assetMode() {
+    const v = $("assetMode").value;
+    return v === "off" ? "icons" : v; // mode is moot when formats are empty
+  }
+  function syncAssetUi() {
+    const v = $("assetMode").value;
+    $("assetFormats").style.display = v === "off" ? "none" : "block";
+    $("assetHint").textContent = v === "frame"
+      ? "Xuất chính selection thành file. Chú ý: frame lớn xuất SVG có thể vượt trần 512KB."
+      : "Tự tìm icon trong selection: node đã đánh dấu Export, vector, và glyph icon-font (Font Awesome…). Tick format bạn cho phép MCP lấy.";
+  }
+
   function doExport() {
     run.disabled = true;
     log.textContent = "…";
@@ -207,6 +481,8 @@ const html = `
       bridgeUrl: $("url").value.trim(),
       token: $("token").value.trim(),
       includeRaster: $("raster").checked,
+      assetFormats: assetFormats(),
+      assetMode: assetMode(),
     } }, "*");
   }
   function doPing() {
@@ -215,8 +491,33 @@ const html = `
       type: "ping", bridgeUrl: $("url").value.trim(), token: $("token").value.trim(),
     } }, "*");
   }
+  function doLive() {
+    parent.postMessage({ pluginMessage: {
+      type: "live",
+      enabled: $("live").checked,
+      bridgeUrl: $("url").value.trim(),
+      token: $("token").value.trim(),
+      assetFormats: assetFormats(),
+      assetMode: assetMode(),
+    } }, "*");
+  }
+  function doAssetPrefs() {
+    // Keep the main thread's allowlist current even while Live is already on.
+    syncAssetUi();
+    parent.postMessage({ pluginMessage: { type: "assetPrefs", assetFormats: assetFormats(), assetMode: assetMode() } }, "*");
+  }
   run.onclick = doExport;
   $("ping").onclick = doPing;
+  $("live").onchange = doLive;
+  document.querySelectorAll(".af").forEach((c) => { c.onchange = doAssetPrefs; });
+  $("assetMode").onchange = doAssetPrefs;
+
+  const LIVE_TEXT = {
+    off: 'Tắt. Bật để Cursor/Claude gọi figma_bridge_live_capture mà bạn không phải bấm export. Panel phải mở.',
+    connecting: '<span class="warn">Đang kết nối…</span>',
+    connected: '<span class="ok">● Live — đang chờ yêu cầu từ AI.</span> Giữ panel mở.',
+    working: '<span class="ok">● Đang phục vụ một yêu cầu…</span>',
+  };
 
   window.onmessage = (event) => {
     const m = event.data.pluginMessage;
@@ -227,11 +528,28 @@ const html = `
       if (m.phase) $("phase").value = String(m.phase);
       if (m.scope) $("scope").value = m.scope;
       $("raster").checked = !!m.includeRaster;
+      const af = Array.isArray(m.assetFormats) ? m.assetFormats : [];
+      document.querySelectorAll(".af").forEach((c) => { c.checked = af.indexOf(c.value) !== -1; });
+      $("assetMode").value = af.length === 0 ? "off" : (m.assetMode === "frame" ? "frame" : "icons");
+      syncAssetUi();
+      // Main thread already restarted the loop when liveEnabled was stored; the
+      // checkbox just needs to reflect it (liveStatus messages fill in the rest).
+      $("live").checked = !!m.liveEnabled;
       doPing();
       return;
     }
     if (m.type === "health") {
       setPill(m.ok ? "ok" : "bad", m.message);
+      return;
+    }
+    if (m.type === "liveStatus") {
+      const box = $("liveLog");
+      if (m.state === "error" || m.state === "retrying") {
+        box.innerHTML = '<span class="err">⚠ ' + (m.detail || m.state) + '</span>';
+        if (m.state === "error") $("live").checked = false;
+      } else {
+        box.innerHTML = LIVE_TEXT[m.state] || m.state;
+      }
       return;
     }
     if (m.type === "done") {
@@ -240,9 +558,16 @@ const html = `
         const s = m.summary;
         let html = '<span class="ok">✓ Đã export</span> · <code>' + s.basename + '</code>'
           + '<br>' + s.nodes + ' node · ' + fmtKB(s.bytes) + ' · phase ' + s.phase + ' · ' + s.scope;
+        if (s.previews || s.images) {
+          html += '<br>🖼 ' + s.previews + ' ảnh màn hình · ' + s.images + ' ảnh nhúng';
+        }
         if (s.truncated) {
           html += '<span class="warn">⚠ Bị cắt bớt: ' + s.omitted + ' node bị bỏ (chạm maxNodes/maxDepth). '
             + 'Thu hẹp selection hoặc tăng giới hạn để đủ dữ liệu.</span>';
+        }
+        if (s.rasterSkipped) {
+          html += '<span class="warn">⚠ ' + s.rasterSkipped + ' ảnh bị bỏ qua — xem meta.rasterReport.skipped '
+            + 'trong file JSON để biết lý do.</span>';
         }
         log.innerHTML = html;
       } else {
@@ -265,12 +590,27 @@ void (async () => {
   const phase = (await get("phase")) as number | undefined;
   const scope = (await get("scope")) as string | undefined;
   const includeRaster = (await get("includeRaster")) as boolean | undefined;
+  const savedFormats = (await get("assetFormats")) as AssetFormat[] | undefined;
+  const savedMode = (await get("assetMode")) as AssetMode | undefined;
+  const liveEnabled = (await get("liveEnabled")) as boolean | undefined;
+  // Seed the allowlist before the UI can toggle Live, so a capture arriving
+  // immediately after the panel opens honours the stored preference.
+  assetPrefs.allowed = Array.isArray(savedFormats) ? savedFormats : [];
+  assetPrefs.mode = savedMode === "frame" ? "frame" : "icons";
   figma.ui.postMessage({
     type: "init",
-    bridgeUrl: typeof url === "string" && url ? url : "http://localhost:3845",
+    bridgeUrl: typeof url === "string" && url ? url : "http://localhost:3846",
     token: typeof token === "string" ? token : "",
     phase: typeof phase === "number" ? phase : 2,
     scope: scope === "page" ? "page" : "selection",
     includeRaster: includeRaster === true,
+    assetFormats: assetPrefs.allowed,
+    assetMode: assetPrefs.mode,
+    liveEnabled: liveEnabled === true,
   });
+  // Live survives a panel reopen: the user opted in once, and having to re-tick
+  // the box every time the panel opens was friction they hit on every session.
+  if (liveEnabled === true && typeof url === "string" && url) {
+    startLive(url.replace(/\/$/, ""), typeof token === "string" ? token : "");
+  }
 })();

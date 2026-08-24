@@ -7,8 +7,14 @@ import {
   cssGradient,
   cssLetterSpacing,
   cssLineHeight,
+  attachHashes,
   cssTextDecoration,
   cssTextTransform,
+  assetContentKey,
+  fitPreviewScale,
+  hashString,
+  isIconCandidate,
+  isIconFontFamily,
   resolveTokens,
 } from "./pure";
 
@@ -16,10 +22,28 @@ export type ExportPhase = 1 | 2 | 3;
 
 export type ExportScope = "selection" | "page";
 
-const PLUGIN_VERSION = "0.7.0";
+export const PLUGIN_VERSION = "0.8.0";
 const DEFAULT_MAX_DEPTH = 48;
-const DEFAULT_MAX_NODES = 8000;
+const DEFAULT_MAX_NODES = 20000;
+// Per-image ceiling for IMAGE fill bytes. Base64 inflates ~33% and up to 12
+// images ship per export, so this stays well inside the bridge's 64MB body cap.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+// Visual-reference renders: longest side of a preview PNG. 1600 keeps UI text
+// legible to a vision model while staying a few hundred KB per screen.
+const MAX_PREVIEW_PX = 1600;
+const MAX_PREVIEWS = 8;
+// Small components may be scaled up, but never past 2x — beyond that a PNG only
+// costs bytes without adding detail.
+const MAX_PREVIEW_SCALE = 2;
 const TEXT_CAP = 8000;
+// Assets = nodes the designer marked with Export settings in Figma. Icons come
+// in the dozens, so the cap is higher than previews; an icon SVG is a few KB, so
+// a fat cap here only catches a whole illustration exported by mistake.
+const MAX_ASSETS = 80;
+const MAX_SVG_CHARS = 512 * 1024;
+// "Icons in frame" mode: anything larger than this on either side is layout,
+// not an icon. 64px covers every icon size in a typical design system.
+const MAX_ICON_PX = 64;
 
 type Counter = { n: number; omitted: number };
 
@@ -246,8 +270,14 @@ function layoutExtras(node: SceneNode): Record<string, unknown> | undefined {
 function layoutSelf(node: SceneNode): Record<string, unknown> | undefined {
   const o: Record<string, unknown> = {};
 
+  // Figma's own defaults are omitted rather than restated on every node: MIN/MIN
+  // constraints, INHERIT align and grow 0 accounted for ~660KB of pure noise in
+  // an 8k-node export. A reader treats an absent key as the default.
   if ("constraints" in node) {
-    o.constraints = (node as ConstraintMixin).constraints;
+    const c = (node as ConstraintMixin).constraints;
+    if (c && (c.horizontal !== "MIN" || c.vertical !== "MIN")) {
+      o.constraints = c;
+    }
   }
 
   // layoutSizing*/grow/align are only valid to read when the node participates
@@ -263,8 +293,12 @@ function layoutSelf(node: SceneNode): Record<string, unknown> | undefined {
     const ln = node as LayoutMixin;
     o.layoutSizingHorizontal = ln.layoutSizingHorizontal;
     o.layoutSizingVertical = ln.layoutSizingVertical;
-    o.layoutGrow = ln.layoutGrow;
-    o.layoutAlign = ln.layoutAlign;
+    if (ln.layoutGrow !== 0) {
+      o.layoutGrow = ln.layoutGrow;
+    }
+    if (ln.layoutAlign !== "INHERIT") {
+      o.layoutAlign = ln.layoutAlign;
+    }
   }
 
   for (const k of ["minWidth", "maxWidth", "minHeight", "maxHeight"] as const) {
@@ -307,8 +341,10 @@ function vectorGeometry(node: SceneNode): Record<string, unknown> | undefined {
   return Object.keys(o).length ? o : undefined;
 }
 
+type TextSegment = { hyperlink?: unknown; [k: string]: unknown };
+
 /** Per-range text styling so bold/colored/sized runs survive (vs. node-level "mixed"). */
-function styledTextSegments(node: TextNode): unknown[] {
+function styledTextSegments(node: TextNode): TextSegment[] {
   try {
     const segs = node.getStyledTextSegments([
       "fontName",
@@ -377,7 +413,14 @@ function textExtras(
     o.textStyleId =
       node.textStyleId === figma.mixed ? "mixed" : node.textStyleId;
     o.fontWeight = node.fontWeight === figma.mixed ? "mixed" : node.fontWeight;
-    o.segments = styledTextSegments(node);
+    // A single uniform run repeats what the node-level text fields above already
+    // say (verified field-by-field against a real 8k-node export: zero divergence,
+    // and segment.fills is the poorer twin of node.fills, which carries cssColor
+    // plus resolved tokens). Only emit runs when they actually differ.
+    const segs = styledTextSegments(node);
+    if (segs.length > 1 || segs.some((s) => s.hyperlink)) {
+      o.segments = segs;
+    }
     // CSS-ready conversions of the (non-mixed) node-level text props.
     const clh = cssLineHeight(o.lineHeight);
     if (clh) {
@@ -728,10 +771,151 @@ function collectMainComponentIds(roots: unknown[]): string[] {
   return [...ids];
 }
 
+/** A SECTION/GROUP is a container; its frame-like children are the screens. */
+function isScreenLike(n: SceneNode): boolean {
+  return (
+    n.type === "FRAME" ||
+    n.type === "COMPONENT" ||
+    n.type === "COMPONENT_SET" ||
+    n.type === "INSTANCE"
+  );
+}
+
+/**
+ * Nodes worth rendering as a visual reference. Rendering a SECTION gives one
+ * huge image of everything; rendering its frame children gives one image per
+ * screen, which is what an agent needs to diff generated UI against the design.
+ */
+function collectPreviewTargets(roots: readonly SceneNode[]): SceneNode[] {
+  const out: SceneNode[] = [];
+  for (const r of roots) {
+    if ((r.type === "SECTION" || r.type === "GROUP") && "children" in r) {
+      const kids = r.children.filter(isScreenLike);
+      if (kids.length > 0) {
+        out.push(...kids);
+        continue;
+      }
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+export type PreviewInfo = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  scale: number;
+  bytes: number;
+};
+export type RasterSkip = { key: string; name: string; reason: string };
+
+export type AssetFormat = "svg" | "png" | "jpg" | "pdf";
+
+export type AssetInfo = {
+  id: string;
+  name: string;
+  type: string;
+  formats: AssetFormat[];
+  /** SVG is inline text — an agent re-emits it as <svg> directly, no fetch. */
+  svg?: string;
+  /** Binary formats live in `rasters`; these are the keys to fetch them by. */
+  rasterKeys?: Partial<Record<"png" | "jpg" | "pdf", string>>;
+};
+
+export type AssetMode = "frame" | "icons";
+
+/**
+ * "frame" mode: export each selected root itself as one asset — the user picked
+ * exactly the thing they want a file of.
+ *
+ * "icons" mode: walk inside the selection and detect the icons — designer-marked
+ * nodes, raw vectors, and small icon-shaped containers (vector-only or icon-font
+ * glyphs — this design system draws icons as Font Awesome TEXT). Recursion stops
+ * at a detected icon so its inner vectors don't also export individually.
+ */
+function collectAssetTargets(
+  roots: readonly SceneNode[],
+  mode: AssetMode,
+): SceneNode[] {
+  if (mode === "frame") {
+    return roots.filter((r) => "exportAsync" in r);
+  }
+  const out: SceneNode[] = [];
+  const seen = new Set<string>();
+
+  const classify = (n: SceneNode): boolean => {
+    let hasVector = false;
+    let hasIconFont = false;
+    let hasPlainText = false;
+    const scan = (x: SceneNode): void => {
+      if (x.type === "VECTOR" || x.type === "BOOLEAN_OPERATION") {
+        hasVector = true;
+      } else if (x.type === "TEXT") {
+        const fam =
+          x.fontName !== figma.mixed ? x.fontName.family : "";
+        if (isIconFontFamily(fam)) {
+          hasIconFont = true;
+        } else {
+          hasPlainText = true;
+        }
+      }
+      if ("children" in x) {
+        for (const c of x.children) {
+          scan(c);
+        }
+      }
+    };
+    scan(n);
+    const b = n.absoluteBoundingBox;
+    return isIconCandidate(
+      {
+        type: n.type,
+        width: b?.width ?? 0,
+        height: b?.height ?? 0,
+        marked: "exportSettings" in n && n.exportSettings.length > 0,
+        hasVectorDescendant: hasVector,
+        hasIconFontText: hasIconFont,
+        hasPlainText,
+        nameHasIcon: /\bicon\b|^ic[-_]/i.test(n.name),
+      },
+      MAX_ICON_PX,
+    );
+  };
+
+  const visit = (n: SceneNode): void => {
+    // A hidden subtree renders nothing: exporting it only produces "no visible
+    // layers" failures (27 of them on one real admin screen — toggled-off
+    // variant states inside instances). Not an icon, not worth a skip entry.
+    if (!n.visible) {
+      return;
+    }
+    if ("exportAsync" in n && !seen.has(n.id) && classify(n)) {
+      seen.add(n.id);
+      out.push(n);
+      return; // an icon's internals are not further icons
+    }
+    if ("children" in n) {
+      for (const c of n.children) {
+        visit(c);
+      }
+    }
+  };
+  for (const r of roots) {
+    visit(r);
+  }
+  return out;
+}
+
 export async function buildExportPayload(opts: {
   phase: ExportPhase;
   scope: ExportScope;
   includeRaster: boolean;
+  /** Formats to export designer-marked asset nodes in. Empty = feature off. */
+  assetFormats?: AssetFormat[];
+  /** "frame" = export selected roots as-is; "icons" = detect icons inside. */
+  assetMode?: AssetMode;
   maxDepth?: number;
   maxNodes?: number;
 }): Promise<Record<string, unknown>> {
@@ -752,31 +936,84 @@ export async function buildExportPayload(opts: {
   const counter: Counter = { n: 0, omitted: 0 };
   const rasters: Record<string, string> = {};
 
-  if (opts.phase >= 3 && opts.includeRaster && opts.scope === "selection") {
-    let c = 0;
-    for (const n of rootsInput) {
-      if (c >= 5) {
-        break;
+  const previews: PreviewInfo[] = [];
+  const rasterSkipped: RasterSkip[] = [];
+
+  // Visual-reference renders: one PNG per screen so an agent can SEE the design
+  // and diff it against the code it generated from the JSON. Scale is fitted to
+  // the node so a 1920x1000 screen and a 64x64 icon both come out usable.
+  if (opts.phase >= 3 && opts.includeRaster) {
+    for (const n of collectPreviewTargets(rootsInput)) {
+      if (previews.length >= MAX_PREVIEWS) {
+        rasterSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: `preview cap ${MAX_PREVIEWS} reached`,
+        });
+        continue;
       }
-      if ("exportAsync" in n && n.visible) {
-        const b = n.absoluteBoundingBox;
-        if (
-          b &&
-          b.width * b.height <= 400 * 400 &&
-          b.width >= 1 &&
-          b.height >= 1
-        ) {
-          try {
-            const bytes = await n.exportAsync({
-              format: "PNG",
-              constraint: { type: "SCALE", value: 1 },
-            });
-            rasters[n.id] = uint8ToBase64(bytes);
-            c++;
-          } catch {
-            /* raster optional */
-          }
+      if (!("exportAsync" in n) || !n.visible) {
+        rasterSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: n.visible ? "node cannot be exported" : "node is hidden",
+        });
+        continue;
+      }
+      const b = n.absoluteBoundingBox;
+      if (!b || b.width < 1 || b.height < 1) {
+        rasterSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: "no bounding box",
+        });
+        continue;
+      }
+      // Fit inside MAX_PREVIEW_PX on BOTH axes so a very tall frame cannot slip
+      // through on width alone; halve and retry when the PNG lands over budget.
+      let scale = fitPreviewScale(
+        b.width,
+        b.height,
+        MAX_PREVIEW_PX,
+        MAX_PREVIEW_SCALE,
+      );
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let bytes: Uint8Array;
+        try {
+          bytes = await n.exportAsync({
+            format: "PNG",
+            constraint: { type: "SCALE", value: scale },
+          });
+        } catch (e) {
+          rasterSkipped.push({
+            key: n.id,
+            name: n.name,
+            reason: `render failed: ${e instanceof Error ? e.message : String(e)}`,
+          });
+          break;
         }
+        if (bytes.length > MAX_IMAGE_BYTES) {
+          if (attempt === 2) {
+            rasterSkipped.push({
+              key: n.id,
+              name: n.name,
+              reason: `render still ${bytes.length} bytes at scale ${scale.toFixed(3)} (cap ${MAX_IMAGE_BYTES})`,
+            });
+            break;
+          }
+          scale = scale / 2;
+          continue;
+        }
+        rasters[n.id] = uint8ToBase64(bytes);
+        previews.push({
+          id: n.id,
+          name: n.name,
+          width: Math.round(b.width * scale),
+          height: Math.round(b.height * scale),
+          scale: Number(scale.toFixed(3)),
+          bytes: bytes.length,
+        });
+        break;
       }
     }
   }
@@ -790,8 +1027,17 @@ export async function buildExportPayload(opts: {
 
   // Resolve IMAGE fill bytes so imageHash references become dereferenceable.
   // Opt-in (raster checkbox), capped count + per-image size to bound payload.
+  let imageCount = 0;
   if (opts.phase >= 3 && opts.includeRaster) {
-    const hashes = collectImageHashes(roots).slice(0, 12);
+    const allHashes = collectImageHashes(roots);
+    const hashes = allHashes.slice(0, 12);
+    for (const h of allHashes.slice(12)) {
+      rasterSkipped.push({
+        key: h,
+        name: "IMAGE fill",
+        reason: "image cap 12 reached",
+      });
+    }
     for (const h of hashes) {
       if (rasters[h]) {
         continue;
@@ -799,16 +1045,130 @@ export async function buildExportPayload(opts: {
       try {
         const img = figma.getImageByHash(h);
         if (!img) {
+          rasterSkipped.push({
+            key: h,
+            name: "IMAGE fill",
+            reason: "hash not resolvable in this file",
+          });
           continue;
         }
         const bytes = await img.getBytesAsync();
-        if (bytes.length > 512 * 1024) {
+        if (bytes.length > MAX_IMAGE_BYTES) {
+          rasterSkipped.push({
+            key: h,
+            name: "IMAGE fill",
+            reason: `${bytes.length} bytes > cap ${MAX_IMAGE_BYTES}`,
+          });
           continue;
         }
         rasters[h] = uint8ToBase64(bytes);
-      } catch {
-        /* image bytes optional */
+        imageCount++;
+      } catch (e) {
+        rasterSkipped.push({
+          key: h,
+          name: "IMAGE fill",
+          reason: `read failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
       }
+    }
+  }
+
+  // Assets, in the user's chosen formats. Mode picks the targets: "frame" =
+  // each selected root itself, "icons" = detected icons inside the selection.
+  // Independent of phase/raster — an icon sheet is useful even on a phase-1
+  // capture. Figma's exportAsync makes any format from any node, so a user
+  // ticking PNG gets PNG even where the node's own Figma preset is SVG.
+  const assets: AssetInfo[] = [];
+  const assetSkipped: RasterSkip[] = [];
+  /** aliasNodeId -> canonical asset id, for nodes whose export bytes matched. */
+  const assetAliases: Record<string, string> = {};
+  const seenAssetContent = new Map<string, string>();
+  const assetFormats = opts.assetFormats ?? [];
+  const assetMode: AssetMode = opts.assetMode ?? "icons";
+  if (assetFormats.length > 0) {
+    for (const n of collectAssetTargets(rootsInput, assetMode)) {
+      if (assets.length >= MAX_ASSETS) {
+        assetSkipped.push({
+          key: n.id,
+          name: n.name,
+          reason: `asset cap ${MAX_ASSETS} reached`,
+        });
+        continue;
+      }
+      const exportable = n as SceneNode & {
+        exportAsync: SceneNode["exportAsync"];
+      };
+      // Stage every requested format first; nothing is committed until the
+      // content is hashed. A repeated table row exports the same glyph dozens
+      // of times (12x one icon on a real admin screen), and identity must come
+      // from the BYTES — two instances of one component can differ via colour
+      // overrides, so deduping by source component would merge distinct icons.
+      const staged: Array<[AssetFormat, string]> = [];
+      for (const fmt of assetFormats) {
+        try {
+          if (fmt === "svg") {
+            const svg = await exportable.exportAsync({ format: "SVG_STRING" });
+            if (svg.length > MAX_SVG_CHARS) {
+              assetSkipped.push({
+                key: `${n.id}@svg`,
+                name: n.name,
+                reason: `svg ${svg.length} chars > cap ${MAX_SVG_CHARS}`,
+              });
+              continue;
+            }
+            staged.push(["svg", svg]);
+          } else {
+            const bytes =
+              fmt === "png"
+                ? await exportable.exportAsync({ format: "PNG" })
+                : fmt === "jpg"
+                  ? await exportable.exportAsync({ format: "JPG" })
+                  : await exportable.exportAsync({ format: "PDF" });
+            if (bytes.length > MAX_IMAGE_BYTES) {
+              assetSkipped.push({
+                key: `${n.id}@${fmt}`,
+                name: n.name,
+                reason: `${bytes.length} bytes > cap ${MAX_IMAGE_BYTES}`,
+              });
+              continue;
+            }
+            staged.push([fmt, uint8ToBase64(bytes)]);
+          }
+        } catch (e) {
+          assetSkipped.push({
+            key: `${n.id}@${fmt}`,
+            name: n.name,
+            reason: `export failed: ${e instanceof Error ? e.message : String(e)}`,
+          });
+        }
+      }
+      if (staged.length === 0) {
+        continue;
+      }
+      const contentKey = assetContentKey(staged);
+      const canonical = seenAssetContent.get(contentKey);
+      if (canonical) {
+        assetAliases[n.id] = canonical;
+        continue;
+      }
+      seenAssetContent.set(contentKey, n.id);
+      const info: AssetInfo = {
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        formats: [],
+      };
+      for (const [fmt, content] of staged) {
+        if (fmt === "svg") {
+          info.svg = content;
+        } else {
+          const key = `${n.id}@${fmt}`;
+          rasters[key] = content;
+          (info.rasterKeys ??= {})[fmt] = key;
+        }
+        info.formats.push(fmt);
+      }
+      assets.push(info);
     }
   }
 
@@ -827,7 +1187,45 @@ export async function buildExportPayload(opts: {
     maxNodes,
   };
 
+  // Surface what raster work actually happened. Skips used to be silent, which
+  // read as "the design has no images" when it really meant "over the cap".
+  if (opts.phase >= 3 && opts.includeRaster) {
+    meta.rasterReport = {
+      previews,
+      imageCount,
+      skipped: rasterSkipped,
+      note: "previews[].id are keys for figma_bridge_get_raster: fetch one to see the rendered design and compare it against generated code.",
+    };
+  }
+
+  // Light index of assets so outline/status can show what's exportable without
+  // carrying the SVG text. The bytes/text themselves ride in payload.assets.
+  if (assetFormats.length > 0) {
+    meta.assetReport = {
+      requested: assetFormats,
+      mode: assetMode,
+      count: assets.length,
+      // A table screen repeats the same glyph per row; those export to
+      // identical bytes and are stored once. aliasCount says how many node ids
+      // resolved to an already-stored asset.
+      aliasCount: Object.keys(assetAliases).length,
+      assets: assets.map((a) => ({
+        id: a.id,
+        name: a.name,
+        formats: a.formats,
+      })),
+      skipped: assetSkipped,
+      note: "Fetch one with figma_bridge_get_asset {nodeId, format}: svg returns inline markup to re-emit, png/jpg return an image block. Duplicate icons are stored once — any node id in assetAliases resolves to its canonical asset.",
+    };
+  }
+
   const payload: Record<string, unknown> = { meta, roots };
+  if (assets.length > 0) {
+    payload.assets = assets;
+  }
+  if (Object.keys(assetAliases).length > 0) {
+    payload.assetAliases = assetAliases;
+  }
 
   if (opts.phase >= 2) {
     const snapshot = await variableSnapshot();
@@ -843,6 +1241,16 @@ export async function buildExportPayload(opts: {
       payload.variables = null;
     }
   }
+
+  // Hash last, once the tree is final (tokens resolved), so `hash` describes the
+  // design as shipped. Per-node hashes let an agent that generated code from an
+  // earlier export find exactly which subtrees moved since — the whole point of
+  // knowing a design changed is knowing WHERE.
+  const rootHashes = roots.map((r) =>
+    attachHashes(r as Record<string, unknown>),
+  );
+  meta.contentHash = hashString(rootHashes.join(""));
+  meta.rootHashes = rootHashes;
 
   if (opts.phase >= 3 && Object.keys(rasters).length > 0) {
     payload.rasters = rasters;

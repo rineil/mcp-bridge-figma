@@ -95,7 +95,7 @@ Tiện ích trong plugin: **đèn trạng thái + nút "Kiểm tra kết nối"*
 |-------|----------|--------------|
 | **1** | Cây node + hình học: bbox/rel, fills/strokes (kèm `cssColor`), auto-layout (+ `layout.css` flexbox) & sizing per-node, vector path (icon→SVG), mask, bo góc, nét đứt | Dựng layout nhanh, file nhẹ |
 | **2** | + Bảng **design tokens** đã resolve (`variables` gọn + `tokens` tại paint), text per-segment + `fontWeight`, chi tiết effect | Dựng đúng màu/spacing theo token (khuyên dùng) |
-| **3** | + Metadata component/variant/instance, + tuỳ chọn **raster PNG** + byte ảnh (`getImageByHash`) | Cần component & ảnh thật |
+| **3** | + Metadata component/variant/instance, + tuỳ chọn **raster**: PNG render **từng màn** (để AI nhìn & đối chiếu code) + byte ảnh nhúng (`getImageByHash`) | Cần component, ảnh thật & kiểm chứng bằng mắt |
 
 `Scope`: **Selection** (các layer đang chọn) hoặc **Toàn bộ page**.
 
@@ -146,6 +146,10 @@ Ký tự đầu phải là `{` (không được xuống dòng hay `>` trước �
 | `figma_bridge_codegen` | Sinh **khung JSX** cho 1 node (`framework`: `react-inline` `style={{}}` hoặc `react-tailwind` `className`); gộp `css`/`layout.css`; text→`<span>`, vector→`<svg>`, ảnh→`<img data-raster>` — scaffold để lặp |
 | `figma_bridge_list_components` | **Inventory component** (phase 3): gom INSTANCE theo main component → `[{id,name,count,instanceIds,hasDefinition}]` để nhận diện component lặp ("Button ×14") |
 | `figma_bridge_read_component` | Đọc **định nghĩa** component theo id (registry phase 3, component **local**) — bản canonical; instance mang `component.overrides` cho phần khác biệt |
+| `figma_bridge_diff_exports` | So **hai export** → `[{id,name,type,change}]`: design đã đổi ở **đâu** kể từ lần sinh code. Bỏ qua nhánh có hash trùng; không tham số thì so export liền trước với `latest` |
+| `figma_bridge_live_status` | Panel Figma **có đang mở không**, đang ở file/page nào. Rẻ, không gọi sang Figma |
+| `figma_bridge_live_capture` | **Lấy export mới ngay từ panel đang mở** — khỏi bấm export tay. Trả về basename để đọc/diff như file thường. Nhận `assetFormats` để lấy kèm icon/asset |
+| `figma_bridge_get_asset` | Lấy **một asset** theo `nodeId` + `format`: `svg` trả markup inline được, `png`/`jpg` trả image block |
 | `figma_bridge_read_export` | Đọc **nguyên** một file (fallback cho file nhỏ) |
 | `figma_bridge_export_schema_hint` | Mô tả nhanh các phase + gợi ý schema |
 
@@ -164,6 +168,53 @@ Gợi ý prompt cho AGENT để dựng UI hiệu quả mà không nổ context:
    - Màu/spacing là token? Đọc `tokens` ngay tại paint hoặc bảng `variables` (đã resolve) để đặt tên biến/Tailwind theme thay vì hard-code.
 
 > Luồng khuyến nghị cho file lớn: `export_outline` → `search_nodes` → `read_node` (thay vì `read_export` đọc cả file).
+
+### Tự kiểm chứng code vừa sinh (phase 3 + raster)
+
+JSON cho biết **giá trị là gì**; ảnh render cho biết **trông phải ra sao**. Sau khi sinh code:
+
+1. Đọc `meta.rasterReport.previews` → danh sách `{id,name,width,height}`, mỗi màn một ảnh.
+2. `figma_bridge_get_raster` với `key` = preview id → trả về **image block**, agent **nhìn thấy** thiết kế thật.
+3. So với output của mình rồi sửa chỗ lệch.
+
+`meta.rasterReport.skipped` giải thích ảnh nào không kèm được và **vì sao**, nên "thiếu ảnh" không bao giờ bị hiểu nhầm thành "thiết kế không có ảnh".
+
+### Chế độ live — khỏi bấm export mỗi lần
+
+Tick **"Chế độ live"** trong plugin. Panel sẽ poll bridge, và AI gọi được **`figma_bridge_live_capture`** để tự lấy dữ liệu mới từ Figma — bạn không phải bấm gì.
+
+```
+Cursor ──live_capture──► MCP ──hàng đợi──► panel poll ──serialize──► exports/*.json
+```
+
+Kết quả được ghi thành **file export bình thường**, nên mọi tool đọc sẵn có (`outline` / `read_node` / `get_raster` / `diff_exports`) dùng được ngay.
+
+> ⚠️ **Giới hạn không thể lách:** Figma **không chạy plugin ở nền**. Panel phải **đang mở, trong đúng file đó**. AI **không đánh thức Figma được** — gọi `figma_bridge_live_status` trước sẽ biết ngay panel có mở không thay vì chờ timeout. Chạy plugin Figma khác cũng làm dừng bridge (Figma chỉ cho 1 plugin chạy).
+>
+> Live chỉ hoạt động qua bridge **nhúng trong tiến trình MCP** (hàng đợi nằm trong RAM tiến trình đó). Nếu chạy `pnpm bridge` riêng và đặt `BRIDGE_EMBED=0`, live tool sẽ báo lỗi rõ ràng thay vì treo.
+>
+> **Nhiều client cùng lúc vẫn dùng được.** Mỗi client spawn một tiến trình MCP riêng nhưng chỉ một chiếm được cổng; các tiến trình còn lại **tự chuyển tiếp** yêu cầu sang tiến trình đó qua chính HTTP có token, nên bạn không phải nhớ client nào đang giữ cổng. Tiến trình thua cũng thử bind lại mỗi 5s để tự lành khi cổng được nhả.
+>
+> **Cổng mặc định đổi thành 3846** (3845 là cổng Figma Dev Mode MCP, rất dễ đụng).
+
+### Tự export icon/asset từ Figma
+
+Trong plugin có select **Export asset** với 2 chế độ + nhóm checkbox format (chỉ hiện khi bật):
+
+| Chế độ | Lấy gì |
+|---|---|
+| **Icon trong frame** | Chọn frame → tự detect icon bên trong: node đã đánh dấu Export, vector, và **glyph icon-font** (Font Awesome, Material Icons…) container ≤64px không chứa text thường. Dừng ở icon — ruột icon không export lẻ |
+| **Cả frame** | Xuất chính selection thành 1 file (illustration, ảnh lớn…) |
+
+Khi live, AI gọi `figma_bridge_live_capture` với `assetFormats: ["svg"]` (+ `assetMode` nếu muốn), hoặc export tay. Rồi:
+- `meta.assetReport` liệt kê `[{id,name,formats}]` + lý do node bị bỏ.
+- `figma_bridge_get_asset {nodeId, format}`: **SVG trả markup inline thẳng vào code**, PNG/JPG trả image block để nhìn.
+
+> ⚠️ Checkbox format là **cổng cho phép**: AI yêu cầu PNG nhưng bạn chỉ tick SVG thì chỉ SVG ra. Chọn "Không xuất asset" = MCP không lấy gì, dù AI có xin. Chế độ trong panel cũng là lựa chọn của bạn — AI chỉ gợi ý được khi bạn chưa đặt.
+
+### Biết design đã đổi ở đâu
+
+Mỗi node có `hash` phủ **cả cây con** (Merkle), cộng `meta.contentHash`. Sau khi design cập nhật và export lại, gọi **`figma_bridge_diff_exports`** (không cần tham số) → chỉ ra đúng những node bị thêm/xoá/sửa, thay vì phải đọc lại cả file để dò. Nhánh có hash trùng bị bỏ qua nguyên khối.
 
 ## Schema JSON
 
