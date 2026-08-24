@@ -7,6 +7,14 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Chưa có thay đổi chưa phát hành._
+
+## [0.8.0] - 2026-08-22
+
+Vòng lặp design-to-code khép kín: kênh live cho AI tự lấy dữ liệu, ảnh render
+để tự đối chiếu, hash để biết design đổi ở đâu, và export icon theo frame.
+Phiên bản: plugin `0.8.0`.
+
 ### Added — chế độ export asset (frame / icon-trong-frame)
 
 - Select **Export asset** trong plugin: *Icon trong frame* (mặc định) tự detect
@@ -68,10 +76,7 @@ tuân theo [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   token và toàn bộ payload. Cần HMAC-SHA256 (sandbox không có `SubtleCrypto`) —
   chưa làm, không nên coi là đã vá.
 
-Vòng lặp "sinh code rồi tự kiểm chứng": ảnh render để agent **nhìn** được thiết kế,
-hash để biết design đã đổi ở **đâu**, và cắt bớt payload trùng lặp. Plugin `0.8.0`.
-
-### Added
+### Added — ảnh render & phát hiện design đổi
 
 - **Ảnh render từng màn (phase 3 + raster)**: trước đây chỉ render node
   `≤ 400×400` nên **không màn hình thật nào** lọt qua. Nay fit theo **cả hai
@@ -92,7 +97,7 @@ hash để biết design đã đổi ở **đâu**, và cắt bớt payload trù
   export liền trước với `latest`. Export cũ chưa có hash vẫn diff được
   (`hashed:false`).
 
-### Changed
+### Changed — payload & giới hạn
 
 - **Trần ảnh nhúng** `512KB` → `4MB` (base64 phồng ~33%, tối đa 12 ảnh nên vẫn
   nằm trong trần body 64MB của bridge). Ảnh hero cỡ thật trước đây luôn bị loại.
